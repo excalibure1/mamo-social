@@ -6,6 +6,7 @@ import MamoMeteo from "./MamoMeteo";
 import MamoDefenderPro from "./MamoDefenderPro";
 import SimqModule from "./SimqModule";
 import MamoCdn from "./MamoCdn";
+import MamoTcvStation from "./MamoTcvStation";
 
 const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:8000").trim();
 const API = (path) => (BACKEND_URL ? `${BACKEND_URL}${path}` : path);
@@ -251,6 +252,7 @@ export default function App() {
       { id: "defender", label: "MAMO Defender PRO", chefOnly: true },
       { id: "simq", label: "SIMQ" },
       { id: "cdn", label: "Mamo CDN" },
+      { id: "tcv", label: "MAMO tCV", vip: true },
       { id: "telecom", label: "Mamo telecom" },
       { id: "meteo", label: "MAMO meteo" },
       { id: "options", label: "Options" },
@@ -629,6 +631,7 @@ export default function App() {
     () => isChef || normalize(digitalId?.role) === normalize(ELITE_PLAN),
     [digitalId, isChef]
   );
+  const hasPremiumAccess = useMemo(() => isElite || isLocalDevHost, [isElite]);
 
   const remainingMinutes = sessionMeta
     ? Math.max(0, Math.ceil((SESSION_TIMEOUT_MS - (Date.now() - (sessionMeta.lastActivityAt || Date.now()))) / 60000))
@@ -651,7 +654,7 @@ export default function App() {
       pushNotif(isChef ? "Session Chef backend requise. Debloque Chef avec signature wallet." : "Zone reservee au Chef.", "warning");
       return;
     }
-    if (tab.vip && !isElite) {
+    if (tab.vip && !hasPremiumAccess) {
       setShowUpgradeModal(true);
       pushNotif("Zone VIP verrouillee. Pass Elite requis.", "warning");
       return;
@@ -1422,6 +1425,18 @@ export default function App() {
                   <button onClick={() => setExternalDeviceConnected(false)}>Retirer module</button>
                 </div>
               </div>
+
+              <div className="card">
+                <h3>MAMO tCV Station</h3>
+                <p className="muted">Station decentralisee complete: identite, wallet, mesh, SDR, snapshots, journal et coffre portable.</p>
+                <p className={hasPremiumAccess ? "ok" : "warn"}>
+                  {hasPremiumAccess ? "Acces disponible sur cet environnement." : `Acces premium requis (${ELITE_PRICE_LABEL}).`}
+                </p>
+                <div className="row">
+                  <button onClick={() => setActiveTab("tcv")}>Ouvrir MAMO tCV</button>
+                  {!hasPremiumAccess && <button onClick={() => setShowUpgradeModal(true)}>Debloquer</button>}
+                </div>
+              </div>
             </div>
           </section>
         )}
@@ -1775,6 +1790,18 @@ export default function App() {
         {activeTab === "simq" && <SimqModule />}
 
         {activeTab === "cdn" && <MamoCdn />}
+
+        {activeTab === "tcv" && !hasPremiumAccess && (
+          <section className="panel glass neon">
+            <h2>MAMO tCV - Zone premium</h2>
+            <p className="warn">
+              MAMO tCV est reserve aux profils Elite Quantum ou Chef en public. Sur ton environnement local, l'acces reste libre pour Capitaine Refractaire.
+            </p>
+            <button onClick={() => setShowUpgradeModal(true)}>Activer l'acces premium</button>
+          </section>
+        )}
+
+        {activeTab === "tcv" && hasPremiumAccess && <MamoTcvStation />}
 
         {activeTab === "telecom" && (
           <section className="panel glass neon">
