@@ -634,6 +634,8 @@ export default function App() {
     : 0;
 
   const lockoutRemainingMs = chefLockedUntil ? Math.max(0, chefLockedUntil - Date.now()) : 0;
+  const chefPublicMessage =
+    "Acces Chef public desactive ici. Utilise un wallet Chef configure cote backend, ou passe par l'environnement local.";
 
   const handleTabClick = async (tab) => {
     if (tab.chefOnly && !hasChefSession) {
@@ -1186,12 +1188,18 @@ export default function App() {
               </button>
             </div>
 
-            <label style={{ display: "block", marginTop: 12 }}>Acces Chef (wallet autorise)</label>
-            <div className="row">
-              <button onClick={unlockChefAccess} disabled={isAuthenticating || lockoutRemainingMs > 0}>
-                {lockoutRemainingMs > 0 ? `Verrouille ${Math.ceil(lockoutRemainingMs / 60000)} min` : "Debloquer Chef"}
-              </button>
-            </div>
+            <label style={{ display: "block", marginTop: 12 }}>Acces Chef</label>
+            {isLocalDevHost ? (
+              <div className="row">
+                <button onClick={unlockChefAccess} disabled={isAuthenticating || lockoutRemainingMs > 0}>
+                  {lockoutRemainingMs > 0 ? `Verrouille ${Math.ceil(lockoutRemainingMs / 60000)} min` : "Debloquer Chef"}
+                </button>
+              </div>
+            ) : (
+              <p className="warn" style={{ marginTop: 8 }}>
+                {chefPublicMessage}
+              </p>
+            )}
 
             <label style={{ display: "block", marginTop: 12 }}>Cle Elite Quantum</label>
             <div className="row">
@@ -1519,7 +1527,13 @@ export default function App() {
         {activeTab === "economy" && !hasChefSession && (
           <section className="panel glass neon">
             <h2>Economie MAMO - Zone Chef uniquement</h2>
-            <p className="warn">{isChef ? "Session Chef backend requise. Debloque Chef avec signature wallet." : "Acces reserve au Chef."}</p>
+            <p className="warn">
+              {isChef
+                ? isLocalDevHost
+                  ? "Session Chef backend requise. Debloque Chef avec signature wallet."
+                  : chefPublicMessage
+                : "Acces reserve au Chef."}
+            </p>
           </section>
         )}
 
@@ -1696,7 +1710,13 @@ export default function App() {
         {activeTab === "ai" && !hasChefSession && (
           <section className="panel glass neon">
             <h2>Command Center IA - Zone Chef uniquement</h2>
-            <p className="warn">{isChef ? "Session Chef backend requise. Debloque Chef avec signature wallet." : "Acces reserve au Chef."}</p>
+            <p className="warn">
+              {isChef
+                ? isLocalDevHost
+                  ? "Session Chef backend requise. Debloque Chef avec signature wallet."
+                  : chefPublicMessage
+                : "Acces reserve au Chef."}
+            </p>
           </section>
         )}
 
@@ -1725,7 +1745,13 @@ export default function App() {
         {activeTab === "defender" && !hasChefSession && (
           <section className="panel glass neon">
             <h2>MAMO Defender PRO - Zone Chef uniquement</h2>
-            <p className="warn">{isChef ? "Session Chef backend requise. Debloque Chef avec signature wallet." : "Acces reserve au Chef."}</p>
+            <p className="warn">
+              {isChef
+                ? isLocalDevHost
+                  ? "Session Chef backend requise. Debloque Chef avec signature wallet."
+                  : chefPublicMessage
+                : "Acces reserve au Chef."}
+            </p>
           </section>
         )}
 
