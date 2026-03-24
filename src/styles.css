@@ -1804,7 +1804,23 @@ input[type="range"] {
     align-items: stretch;
   }
 
+  .cdn-player-bottom {
+    padding: 14px 12px max(14px, env(safe-area-inset-bottom));
+  }
+
+  .cdn-player-info h3 {
+    font-size: 22px;
+  }
+
+  .cdn-player-info p {
+    letter-spacing: 0.08em;
+  }
+
   .cdn-player-controls input[type="range"] {
     width: 120px;
+  }
+
+  .cdn-unmute-hint {
+    display: none;
   }
 }

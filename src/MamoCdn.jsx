@@ -218,6 +218,7 @@ export default function MamoCdn() {
   const [showUnmuteHint, setShowUnmuteHint] = useState(false);
   const [previewItemId, setPreviewItemId] = useState(null);
   const [previewRemaining, setPreviewRemaining] = useState(15);
+  const [isTouchDevice, setIsTouchDevice] = useState(false);
 
   const mediaData = useMemo(() => {
     const generated = [...BASE_CATALOG];
@@ -260,6 +261,19 @@ export default function MamoCdn() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const media = window.matchMedia("(max-width: 780px), (pointer: coarse)");
+    const syncTouchMode = () => setIsTouchDevice(media.matches);
+    syncTouchMode();
+    if (media.addEventListener) {
+      media.addEventListener("change", syncTouchMode);
+      return () => media.removeEventListener("change", syncTouchMode);
+    }
+    media.addListener(syncTouchMode);
+    return () => media.removeListener(syncTouchMode);
+  }, []);
+
+  useEffect(() => {
     if (!playerItem || playerItem.source === "youtube" || playerItem.kind === "external") {
       return undefined;
     }
@@ -276,7 +290,7 @@ export default function MamoCdn() {
     video.volume = playerVolume;
     video.playsInline = true;
     video.autoplay = true;
-    video.controls = false;
+    video.controls = isTouchDevice;
 
     const safePlay = async () => {
       try {
@@ -297,6 +311,16 @@ export default function MamoCdn() {
     const onPause = () => setIsPlaying(false);
     const onWaiting = () => setPlayerLoading(true);
     const onCanPlay = () => setPlayerLoading(false);
+    const onVolumeChange = () => {
+      const muted = Boolean(video.muted) || Number(video.volume) === 0;
+      setPlayerMuted(muted);
+      if (!muted || isTouchDevice) {
+        setShowUnmuteHint(false);
+      }
+    };
+    const onFullscreenEntered = () => {
+      setShowUnmuteHint(false);
+    };
     const fallbackToSafeStream = async () => {
       const fallbackUrl = playerItem.fallbackUrl || DEFAULT_STREAM_URL;
       if (!fallbackUrl || video.dataset.fallbackApplied === fallbackUrl) {
@@ -319,6 +343,9 @@ export default function MamoCdn() {
     video.addEventListener("pause", onPause);
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("canplay", onCanPlay);
+    video.addEventListener("volumechange", onVolumeChange);
+    video.addEventListener("webkitbeginfullscreen", onFullscreenEntered);
+    document.addEventListener("fullscreenchange", onFullscreenEntered);
     video.addEventListener("error", onError);
 
     const init = async () => {
@@ -370,13 +397,25 @@ export default function MamoCdn() {
       video.removeEventListener("pause", onPause);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("canplay", onCanPlay);
+      video.removeEventListener("volumechange", onVolumeChange);
+      video.removeEventListener("webkitbeginfullscreen", onFullscreenEntered);
+      document.removeEventListener("fullscreenchange", onFullscreenEntered);
       video.removeEventListener("error", onError);
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
     };
-  }, [playerItem, playerMuted, playerVolume]);
+  }, [playerItem, playerMuted, playerVolume, isTouchDevice]);
+
+  useEffect(() => {
+    if (!playerItem || playerItem.source === "youtube") return;
+    if (isTouchDevice || !playerMuted) {
+      setShowUnmuteHint(false);
+      return;
+    }
+    setShowUnmuteHint(true);
+  }, [playerItem, playerMuted, isTouchDevice]);
 
   useEffect(() => {
     const video = playerVideoRef.current;
@@ -459,7 +498,7 @@ export default function MamoCdn() {
     setPlayerVolume(0.8);
     setPlayerItem(item);
     setPlayerLoading(item.source !== "youtube");
-    setShowUnmuteHint(item.source !== "youtube");
+    setShowUnmuteHint(item.source !== "youtube" && !isTouchDevice);
   };
 
   const closePlayer = () => {
@@ -515,6 +554,18 @@ export default function MamoCdn() {
 
   const toggleFullscreen = async () => {
     const root = playerRootRef.current;
+    const video = playerVideoRef.current;
+    if (video && playerItem?.source !== "youtube") {
+      setShowUnmuteHint(false);
+      if (typeof video.requestFullscreen === "function" && !document.fullscreenElement) {
+        await video.requestFullscreen();
+        return;
+      }
+      if (typeof video.webkitEnterFullscreen === "function") {
+        video.webkitEnterFullscreen();
+        return;
+      }
+    }
     if (!root) return;
     if (!document.fullscreenElement) {
       await root.requestFullscreen?.();
@@ -676,6 +727,7 @@ export default function MamoCdn() {
                     poster={playerItem.poster}
                     muted={playerMuted}
                     playsInline
+                    controls={isTouchDevice}
                   />
                 )}
 
