@@ -167,6 +167,7 @@ function EntanglementVisualizer({ state, isMining }) {
 export default function App() {
   const lastActivityRef = useRef(Date.now());
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [digitalId, setDigitalId] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
   const [importText, setImportText] = useState("");
@@ -643,6 +644,7 @@ export default function App() {
         const unlocked = await unlockChefAccess();
         if (unlocked) {
           setActiveTab(tab.id);
+          setMobileMenuOpen(false);
           return;
         }
       }
@@ -655,6 +657,7 @@ export default function App() {
       return;
     }
     setActiveTab(tab.id);
+    setMobileMenuOpen(false);
   };
 
   useEffect(() => {
@@ -1239,7 +1242,19 @@ export default function App() {
 
   return (
     <div className="page">
-      <aside className="sidebar glass">
+      <div className="mobile-topbar glass">
+        <button className="mobile-menu-toggle" onClick={() => setMobileMenuOpen((prev) => !prev)}>
+          {mobileMenuOpen ? "Fermer le menu" : "Menu"}
+        </button>
+        <div className="mobile-topbar-meta">
+          <strong>MAMO Production</strong>
+          <span>{tabs.find((tab) => tab.id === activeTab)?.label || "Navigation"}</span>
+        </div>
+      </div>
+
+      {mobileMenuOpen && <button className="mobile-backdrop" onClick={() => setMobileMenuOpen(false)} aria-label="Fermer le menu" />}
+
+      <aside className={`sidebar glass ${mobileMenuOpen ? "open" : ""}`}>
         <h1>MAMO Production</h1>
         <p className="status">{status}</p>
         <p className="muted" style={{ marginTop: 8, fontSize: 12 }}>

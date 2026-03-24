@@ -30,6 +30,10 @@ body {
   grid-template-columns: 280px 1fr;
 }
 
+.mobile-topbar {
+  display: none;
+}
+
 .entry-page {
   min-height: 100vh;
   display: grid;
@@ -159,6 +163,7 @@ button {
   font-weight: 700;
   border: 0;
   cursor: pointer;
+  touch-action: manipulation;
 }
 
 button:disabled {
@@ -259,6 +264,127 @@ input[type="range"] {
 .telecom-side,
 .telecom-main {
   min-height: 620px;
+}
+
+.mobile-menu-toggle {
+  min-height: 48px;
+  min-width: 48px;
+}
+
+@media (max-width: 900px) {
+  .page {
+    display: block;
+  }
+
+  .mobile-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 35;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-bottom: 1px solid rgba(0, 238, 255, 0.2);
+  }
+
+  .mobile-topbar-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .mobile-topbar-meta strong {
+    font-family: "Orbitron", sans-serif;
+    font-size: 14px;
+  }
+
+  .mobile-topbar-meta span {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 40;
+    width: min(86vw, 320px);
+    overflow-y: auto;
+    transform: translateX(-105%);
+    transition: transform 0.22s ease;
+    border-right: 1px solid rgba(0, 238, 255, 0.25);
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .mobile-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 39;
+    background: rgba(2, 8, 18, 0.72);
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+  }
+
+  .content {
+    padding: 14px;
+  }
+
+  .entry-page {
+    padding: 14px;
+  }
+
+  .entry-panel {
+    width: 100%;
+  }
+
+  .grid.two,
+  .telecom-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .row {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .row > * {
+    width: 100%;
+  }
+
+  input,
+  select,
+  button,
+  textarea {
+    width: 100%;
+    min-height: 48px;
+    font-size: 16px;
+  }
+
+  .tab {
+    min-height: 52px;
+    display: flex;
+    align-items: center;
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  .panel {
+    padding: 14px;
+  }
+
+  .card {
+    padding: 14px;
+  }
+
+  .viz {
+    height: 220px;
+  }
 }
 
 .telecom-card,
