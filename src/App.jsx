@@ -243,7 +243,7 @@ export default function App() {
     () => [
       { id: "dashboard", label: "Vue Globale" },
       { id: "economy", label: "Economie MAMO", chefOnly: true },
-      { id: "banking", label: "Banking", vip: true },
+      { id: "banking", label: "Banking" },
       { id: "web3", label: "Web3 Mamora Quantum Bank", vip: true },
       { id: "ipfs", label: "Dreambox" },
       { id: "ai", label: "Command Center IA", chefOnly: true },
@@ -1411,21 +1411,11 @@ export default function App() {
           </section>
         )}
 
-        {activeTab === "banking" && !isElite && (
-          <section className="panel glass neon">
-            <h2>Banking - Zone VIP verrouillee</h2>
-            <p className="warn">
-              Ce module est reserve aux profils Elite Quantum ou Chef. Forging requis: {ELITE_PRICE_LABEL}.
-            </p>
-            <button onClick={() => setShowUpgradeModal(true)}>Ouvrir modal Elite</button>
-          </section>
-        )}
-
-        {activeTab === "banking" && isElite && (
+        {activeTab === "banking" && (
           <section className="panel glass neon">
             <h2>IntÃ©gration bancaire : Plaid / Stripe / AML-KYC avec MetaMask</h2>
             <p className="muted">
-              {"Architecture d'orchestration Fiat -> Web3 : Wallet auth, conformitÃ©, rails de paiement et mint contrÃ´lÃ©."}
+              {"Connexion wallet, conformite KYC et rails de paiement. Le compte Standard peut connecter son wallet; les achats MAMO restent reserves a Elite/Chef."}
             </p>
 
             <div className="grid two">
@@ -1445,7 +1435,7 @@ export default function App() {
                 <div className="row">
                   <button onClick={initiateKyc}>Initier KYC</button>
                   <button onClick={checkKycStatus}>VÃ©rifier statut</button>
-                  <button onClick={approveKycDev}>Approve (dev)</button>
+                  {isLocalDevHost && <button onClick={approveKycDev}>Approve (dev)</button>}
                 </div>
                 <p className={kycStatus === "approved" ? "ok" : "warn"}>
                   {kycStatus === "approved" ? "KYC validÃ©: achats autorisÃ©s." : "KYC requis avant achat."}
@@ -1453,66 +1443,76 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid two">
+            {!isElite ? (
               <div className="card">
-                <h3>3) Fund / Buy MAMO</h3>
-                <label>
-                  MÃ©thode
-                  <select value={purchaseMethod} onChange={(e) => setPurchaseMethod(e.target.value)}>
-                    <option value="stripe">Buy with Card (Stripe)</option>
-                    <option value="plaid">Bank Transfer (Plaid)</option>
-                  </select>
-                </label>
-                <label>
-                  Montant (USD)
-                  <input value={purchaseAmount} onChange={(e) => setPurchaseAmount(e.target.value)} />
-                </label>
-                <div className="row">
-                  <button onClick={initiatePurchase}>/api/purchase/initiate</button>
-                  <button onClick={() => confirmLastOrder(purchaseMethod)}>Simuler webhook succÃ¨s</button>
-                </div>
-                <p>Dernier ordre: {lastOrder?.order_id || "-"}</p>
-                <p>Payload paiement: {lastOrder?.clientSecret || lastOrder?.transfer_id || "-"}</p>
+                <h3>3) Fonctions Elite verrouillees</h3>
+                <p className="warn">
+                  Le compte Standard peut connecter son wallet et preparer le KYC. Les achats MAMO, confirmations et le ledger complet restent reserves aux profils Elite Quantum ou Chef.
+                </p>
+                <button onClick={() => setShowUpgradeModal(true)}>Ouvrir modal Elite</button>
               </div>
+            ) : (
+              <div className="grid two">
+                <div className="card">
+                  <h3>3) Fund / Buy MAMO</h3>
+                  <label>
+                    MÃ©thode
+                    <select value={purchaseMethod} onChange={(e) => setPurchaseMethod(e.target.value)}>
+                      <option value="stripe">Buy with Card (Stripe)</option>
+                      <option value="plaid">Bank Transfer (Plaid)</option>
+                    </select>
+                  </label>
+                  <label>
+                    Montant (USD)
+                    <input value={purchaseAmount} onChange={(e) => setPurchaseAmount(e.target.value)} />
+                  </label>
+                  <div className="row">
+                    <button onClick={initiatePurchase}>/api/purchase/initiate</button>
+                    <button onClick={() => confirmLastOrder(purchaseMethod)}>Simuler webhook succÃ¨s</button>
+                  </div>
+                  <p>Dernier ordre: {lastOrder?.order_id || "-"}</p>
+                  <p>Payload paiement: {lastOrder?.clientSecret || lastOrder?.transfer_id || "-"}</p>
+                </div>
 
-              <div className="card">
-                <h3>4) Ledger des ordres</h3>
-                <div className="table-wrap">
-                  <table className="bloomberg">
-                    <thead>
-                      <tr>
-                        <th>Order</th>
-                        <th>MÃ©thode</th>
-                        <th>Fiat</th>
-                        <th>Tokens</th>
-                        <th>Statut</th>
-                        <th>Tx</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {orders.map((o) => (
-                        <tr key={o.order_id}>
-                          <td>{o.order_id.slice(0, 14)}...</td>
-                          <td>{o.method}</td>
-                          <td>{o.amount_fiat}</td>
-                          <td>{o.amount_tokens}</td>
-                          <td>{o.status}</td>
-                          <td>
-                            {o.tx_hash ? (
-                              <a href={`https://polygonscan.com/tx/${o.tx_hash}`} target="_blank" rel="noreferrer">
-                                {o.tx_hash.slice(0, 12)}...
-                              </a>
-                            ) : (
-                              "-"
-                            )}
-                          </td>
+                <div className="card">
+                  <h3>4) Ledger des ordres</h3>
+                  <div className="table-wrap">
+                    <table className="bloomberg">
+                      <thead>
+                        <tr>
+                          <th>Order</th>
+                          <th>MÃ©thode</th>
+                          <th>Fiat</th>
+                          <th>Tokens</th>
+                          <th>Statut</th>
+                          <th>Tx</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {orders.map((o) => (
+                          <tr key={o.order_id}>
+                            <td>{o.order_id.slice(0, 14)}...</td>
+                            <td>{o.method}</td>
+                            <td>{o.amount_fiat}</td>
+                            <td>{o.amount_tokens}</td>
+                            <td>{o.status}</td>
+                            <td>
+                              {o.tx_hash ? (
+                                <a href={`https://polygonscan.com/tx/${o.tx_hash}`} target="_blank" rel="noreferrer">
+                                  {o.tx_hash.slice(0, 12)}...
+                                </a>
+                              ) : (
+                                "-"
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             <div className="card">
               <h3>Ã‰tat orchestration</h3>
