@@ -459,25 +459,34 @@ export default function App() {
     localStorage.setItem("mamo-elite-codes", JSON.stringify(eliteAccessCodes));
   }, [eliteAccessCodes]);
 
-  const loginAsStandard = async () => {
-    try {
-      const nextUser = createUser(STANDARD_PLAN);
+  const createFreeStandardIdentity = useCallback(() => {
+    const nextUser = createUser(STANDARD_PLAN);
+    setDigitalId(nextUser);
+    localStorage.setItem("mamo-digital-id", JSON.stringify(nextUser));
+    pushNotif("Entree Standard ouverte. Wallet optionnel pour Banking et Web3.", "success");
+    return nextUser;
+  }, [pushNotif]);
+
+  const loginAsStandard = useCallback(() => {
+    createFreeStandardIdentity();
+  }, [createFreeStandardIdentity]);
+
+  const linkWalletSession = useCallback(
+    async (targetUser = null, successMessage = "Wallet connecte et lie a la session.") => {
+      const user = targetUser || digitalId || createFreeStandardIdentity();
       const auth = await authenticateWithBackend("wallet_login");
       applyBackendSession(auth.backend, auth.walletAddress);
-      await persistSignedSession(nextUser, auth);
-      pushNotif("Session Standard initiee avec signature wallet.", "success");
-    } catch (error) {
-      pushNotif(toErrorText(error, "Echec authentification wallet."), "warning");
-    }
-  };
+      await persistSignedSession(user, auth);
+      pushNotif(successMessage, "success");
+      return { user, auth };
+    },
+    [digitalId, createFreeStandardIdentity, authenticateWithBackend, applyBackendSession, persistSignedSession, pushNotif]
+  );
 
   const restoreEliteDemo = async () => {
     try {
       const nextUser = createUser(ELITE_PLAN);
-      const auth = await authenticateWithBackend("wallet_login");
-      applyBackendSession(auth.backend, auth.walletAddress);
-      await persistSignedSession(nextUser, auth);
-      pushNotif("Pass Elite Quantum restaure avec signature wallet.", "success");
+      await linkWalletSession(nextUser, "Pass Elite Quantum restaure avec signature wallet.");
     } catch (error) {
       pushNotif(toErrorText(error, "Echec restauration Elite."), "warning");
     }
@@ -534,12 +543,9 @@ export default function App() {
         eliteGrantedAt: new Date().toISOString(),
         eliteSource: "mintElite()",
       };
-      const auth = await authenticateWithBackend("wallet_login");
-      applyBackendSession(auth.backend, auth.walletAddress);
-      await persistSignedSession(targetUser, auth);
+      await linkWalletSession(targetUser, "SBT Elite forge avec signature wallet.");
       setShowUpgradeModal(false);
       setActiveTab("banking");
-      pushNotif("SBT Elite forge avec signature wallet.", "success");
     } catch (error) {
       pushNotif(toErrorText(error, "Echec forge Elite."), "warning");
     } finally {
@@ -590,14 +596,11 @@ export default function App() {
         eliteSource: "chef-generated-code",
         lifetimeAccess: true,
       };
-      const auth = await authenticateWithBackend("wallet_login");
-      applyBackendSession(auth.backend, auth.walletAddress);
-      await persistSignedSession(targetUser, auth);
+      await linkWalletSession(targetUser, "Cle Elite acceptee avec signature wallet.");
       setEliteAccessCodes((prev) =>
         prev.map((item, i) => (i === index ? { ...item, used: true, usedAt: new Date().toISOString() } : item))
       );
       setRedeemCode("");
-      pushNotif("Cle Elite acceptee avec signature wallet.", "success");
     } catch (error) {
       pushNotif(toErrorText(error, "Echec activation Elite."), "warning");
     }
@@ -763,6 +766,9 @@ export default function App() {
 
   const connectWallet = async () => {
     try {
+      if (!digitalId) {
+        createFreeStandardIdentity();
+      }
       const session = await ensureWalletBankingSession();
       setBankingMessage(
         session.restored
@@ -1160,13 +1166,21 @@ export default function App() {
         <section className="panel glass neon entry-panel">
           <h2>Digital ID - Portail d&apos;Entree Securise</h2>
           <p className="muted">
-            Session signee wallet obligatoire. Les modules Banking et Web3 sont reserves aux profils Elite ou Chef.
+            L&apos;entree Standard est gratuite et immediate. Le wallet devient optionnel et sert seulement pour Banking, Web3, Elite et Chef.
           </p>
           <div className="card" style={{ marginTop: 12 }}>
             <div className="row">
-              <button onClick={loginAsStandard} disabled={isAuthenticating}>
-                {isAuthenticating ? "Signature..." : "Entrer Standard (wallet)"}
+              <button onClick={loginAsStandard}>
+                Entrer Standard gratuitement
               </button>
+              <button
+                onClick={() => linkWalletSession(null, "Session Standard ouverte avec wallet lie.")}
+                disabled={isAuthenticating}
+              >
+                {isAuthenticating ? "Signature..." : "Entrer + connecter wallet"}
+              </button>
+            </div>
+            <div className="row" style={{ marginTop: 12 }}>
               <button onClick={restoreEliteDemo} disabled={isAuthenticating}>
                 {isAuthenticating ? "Signature..." : "Restaurer Elite (wallet)"}
               </button>
