@@ -166,6 +166,16 @@ function buildCdnServiceUrl(api, action = "") {
   return action ? api(`/api/platform/cdn/service/${action}`) : api("/api/platform/cdn/service");
 }
 
+async function fetchWithTimeout(resource, options = {}, timeoutMs = 6000) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(resource, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 function createFallbackCatalog() {
   const generated = [...BASE_CATALOG];
   for (let i = 0; i < 12; i += 1) {
@@ -331,7 +341,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     try {
       const headers = {};
       if (authToken) headers.Authorization = `Bearer ${authToken}`;
-      const response = await fetch(buildCdnRegistryUrl(api, userAddress), { headers });
+      const response = await fetchWithTimeout(buildCdnRegistryUrl(api, userAddress), { headers });
       if (!response.ok) {
         throw new Error(`cdn_registry_${response.status}`);
       }
@@ -353,7 +363,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     try {
       const headers = {};
       if (authToken) headers.Authorization = `Bearer ${authToken}`;
-      const response = await fetch(buildCdnServiceUrl(api, desiredRunning ? "start" : "stop"), {
+      const response = await fetchWithTimeout(buildCdnServiceUrl(api, desiredRunning ? "start" : "stop"), {
         method: "POST",
         headers,
       });
@@ -549,9 +559,11 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     if (syncCancelledRef.current) return;
     await new Promise((resolve) => window.setTimeout(resolve, 700));
     if (!syncCancelledRef.current) {
-      await toggleCdnService(true);
-      await refreshRegistry(true);
       setMode("app");
+      window.setTimeout(() => {
+        void toggleCdnService(true);
+        void refreshRegistry(true);
+      }, 0);
     }
   };
 
