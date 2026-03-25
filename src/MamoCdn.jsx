@@ -625,29 +625,49 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   const startConnection = async () => {
     syncCancelledRef.current = false;
     setMode("sync");
-    let payload = await refreshRegistry(false);
-    if (syncCancelledRef.current) return;
-
-    const serviceRunning = Boolean(payload?.service?.running || replicationService.running);
-    if (!serviceRunning) {
-      await toggleCdnService(true);
-      payload = await refreshRegistry(true);
-    }
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (syncCancelledRef.current) return;
-      // Short live polling window so the sync screen reflects real nodes before entering the app.
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((resolve) => window.setTimeout(resolve, 450));
-      // eslint-disable-next-line no-await-in-loop
-      payload = await refreshRegistry(true);
-      if (payload?.summary?.nodeCount && payload?.catalog?.length) {
-        break;
+    const bootStartedAt = Date.now();
+    const failOpenTimer = window.setTimeout(() => {
+      if (!syncCancelledRef.current) {
+        setMode("app");
+        void refreshRegistry(true);
       }
-    }
+    }, 2200);
 
-    if (!syncCancelledRef.current) {
-      setMode("app");
+    try {
+      let payload = await refreshRegistry(false);
+      if (syncCancelledRef.current) return;
+
+      const serviceRunning = Boolean(payload?.service?.running || replicationService.running);
+      if (!serviceRunning) {
+        await toggleCdnService(true);
+        payload = await refreshRegistry(true);
+      }
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (syncCancelledRef.current) return;
+        // Short live polling window so the sync screen reflects real nodes before entering the app.
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => window.setTimeout(resolve, 450));
+        // eslint-disable-next-line no-await-in-loop
+        payload = await refreshRegistry(true);
+        if (payload?.summary?.nodeCount && payload?.catalog?.length) {
+          break;
+        }
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setRegistryError(String(error?.message || "cdn_boot_failed"));
+      }
+    } finally {
+      window.clearTimeout(failOpenTimer);
+      const remainingBootMs = Math.max(0, 1600 - (Date.now() - bootStartedAt));
+      if (remainingBootMs > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, remainingBootMs));
+      }
+      if (!syncCancelledRef.current) {
+        setMode("app");
+        void refreshRegistry(true);
+      }
     }
   };
 
