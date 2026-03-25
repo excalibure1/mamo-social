@@ -866,6 +866,9 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     const fallback = createFallbackCatalog().filter((item) => (item.category || "").toLowerCase() === tab);
     return fallback;
   }, [mediaData, currentTab]);
+  const displayedItems = useMemo(() => filteredItems.filter((item) => item && item.id), [filteredItems]);
+  const featuredItem = displayedItems[0] || null;
+  const currentTabLabel = currentTab === "P2P" ? "Cinema P2P" : currentTab;
   const cdnNodes = useMemo(() => registrySnapshot?.nodes || [], [registrySnapshot]);
   const syncQueue = useMemo(() => registrySnapshot?.syncQueue || [], [registrySnapshot]);
   const replicationService = registrySnapshot?.service || {};
@@ -1780,70 +1783,354 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
             </div>
 
             <div className="cdn-headline">
-              <h2>{currentTab === "P2P" ? "Cinema P2P" : currentTab}</h2>
-              <span>{filteredItems.length} SOURCES</span>
+              <h2>{currentTabLabel}</h2>
+              <span>{displayedItems.length} SOURCES</span>
             </div>
 
-            <div className="cdn-grid">
-              {filteredItems.map((item) => {
-                const isPreviewing = previewItemId === item.id;
-                return (
-                  <article key={item.id} className="cdn-card">
-                    <div className="cdn-card-media">
-                      <div className={`cdn-preview-layer ${isPreviewing ? "active" : ""}`}>
-                        <video
-                          ref={(node) => {
-                            if (node) previewVideoRefs.current.set(item.id, node);
-                            else previewVideoRefs.current.delete(item.id);
-                          }}
-                          muted
-                          loop
-                          playsInline
-                          preload="none"
-                          crossOrigin="anonymous"
-                          className="cdn-preview-video"
-                          onError={() => stopPreview(item.id)}
-                        />
-                        <div className="cdn-preview-countdown">{previewRemaining}s</div>
-                        <div className="cdn-preview-label">PREVIEW NODE</div>
-                      </div>
-
-                      <img src={item.poster} alt={item.title} className="cdn-poster" />
-                      <div className="cdn-poster-overlay" />
-
-                      <button
-                        type="button"
-                        className="cdn-node-thumb"
-                        onMouseEnter={() => startPreview(item)}
-                        onMouseLeave={() => stopPreview(item.id)}
-                        onFocus={() => startPreview(item)}
-                        onBlur={() => stopPreview(item.id)}
+            {featuredItem ? (
+              <div
+                style={{
+                  display: "grid",
+                  gap: 18,
+                  gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))",
+                  marginBottom: 24,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => openPlayer(featuredItem)}
+                  style={{
+                    position: "relative",
+                    minHeight: 320,
+                    borderRadius: 28,
+                    overflow: "hidden",
+                    border: "1px solid rgba(34,211,238,0.24)",
+                    background: "rgba(3,10,24,0.95)",
+                    padding: 0,
+                    cursor: "pointer",
+                    textAlign: "left",
+                    boxShadow: "0 22px 56px rgba(2, 8, 23, 0.42)",
+                  }}
+                >
+                  <img
+                    src={featuredItem.poster}
+                    alt={featuredItem.title}
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "cover",
+                      opacity: 0.74,
+                    }}
+                  />
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      background: `linear-gradient(135deg, ${featuredItem.color || "#06b6d4"}22, rgba(2,6,23,0.12) 28%, rgba(2,6,23,0.92) 78%)`,
+                    }}
+                  />
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      padding: 22,
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "8px 12px",
+                          borderRadius: 999,
+                          background: "rgba(6, 182, 212, 0.18)",
+                          border: "1px solid rgba(34, 211, 238, 0.28)",
+                          color: "#67e8f9",
+                          fontSize: 11,
+                          fontWeight: 800,
+                          letterSpacing: "0.14em",
+                          textTransform: "uppercase",
+                        }}
                       >
-                        <img src={item.nodeImage} alt={item.nodeTitle} />
-                        <div className="cdn-node-title">{item.nodeTitle}</div>
-                        <div className={`cdn-node-bar ${isPreviewing ? "active" : ""}`} />
-                      </button>
-
-                      <button type="button" className="cdn-play-overlay" onClick={() => openPlayer(item)}>
-                        {item.kind === "external" ? <ExternalLink size={28} /> : <Play size={28} />}
-                      </button>
+                        <Radio size={14} />
+                        Live relay
+                      </span>
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "8px 12px",
+                          borderRadius: 999,
+                          background: "rgba(15, 23, 42, 0.82)",
+                          border: "1px solid rgba(148, 163, 184, 0.18)",
+                          color: "#e2e8f0",
+                          fontSize: 11,
+                          fontWeight: 800,
+                          letterSpacing: "0.12em",
+                          textTransform: "uppercase",
+                        }}
+                      >
+                        {featuredItem.source === "hls" ? "HLS" : "MAMO Proxy"}
+                      </span>
                     </div>
 
-                    <button type="button" className="cdn-card-meta" onClick={() => openPlayer(item)}>
-                      <h3>{item.title}</h3>
-                      <span>
-                        {item.kind === "p2p"
-                          ? `PEERS: ${item.peers}`
-                          : `SYNC ${String(item.syncState || "ready").toUpperCase()} | ${item.replicaCount || 0}/${item.desiredReplicas || 0}`}
-                      </span>
-                      <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-                        hash {item.hash?.slice(0, 10) || "local"} | {item.priority || "medium"} | {item.freshness || "fresh"}
+                    <div style={{ maxWidth: 720 }}>
+                      <div
+                        style={{
+                          color: "#7dd3fc",
+                          fontSize: 12,
+                          fontWeight: 800,
+                          letterSpacing: "0.16em",
+                          textTransform: "uppercase",
+                          marginBottom: 8,
+                        }}
+                      >
+                        {featuredItem.nodeTitle || "MAMO Mesh Core"}
+                      </div>
+                      <h3
+                        style={{
+                          margin: 0,
+                          color: "#ffffff",
+                          fontSize: "clamp(28px, 5vw, 52px)",
+                          lineHeight: 0.96,
+                          textTransform: "uppercase",
+                          fontStyle: "italic",
+                        }}
+                      >
+                        {featuredItem.title}
+                      </h3>
+                      <p
+                        style={{
+                          margin: "12px 0 0",
+                          color: "#dbeafe",
+                          fontSize: 14,
+                          lineHeight: 1.6,
+                          maxWidth: 680,
+                        }}
+                      >
+                        {featuredItem.synopsis}
+                      </p>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 16 }}>
+                        <span className="cdn-hub-pill" style={{ background: "rgba(34, 197, 94, 0.16)" }}>
+                          <Wifi size={14} color="#4ade80" />
+                          <span>{featuredItem.kind === "p2p" ? `${featuredItem.peers || 0} peers` : `${featuredItem.replicaCount || 0}/${featuredItem.desiredReplicas || 0} replicas`}</span>
+                        </span>
+                        <span className="cdn-hub-pill" style={{ background: "rgba(15, 23, 42, 0.84)" }}>
+                          <Shield size={14} color="#cbd5f5" />
+                          <span>{String(featuredItem.syncState || "ready").toUpperCase()} | {featuredItem.freshness || "fresh"}</span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+
+                <div style={{ display: "grid", gap: 12 }}>
+                  {displayedItems.slice(1, 5).map((item) => (
+                    <button
+                      key={`${item.id}-rail`}
+                      type="button"
+                      onClick={() => openPlayer(item)}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "110px minmax(0,1fr)",
+                        gap: 14,
+                        alignItems: "stretch",
+                        borderRadius: 22,
+                        border: "1px solid rgba(34,211,238,0.18)",
+                        background: "rgba(5,16,31,0.92)",
+                        overflow: "hidden",
+                        padding: 0,
+                        cursor: "pointer",
+                        textAlign: "left",
+                      }}
+                    >
+                      <div style={{ minHeight: 118, background: "#020617" }}>
+                        <img
+                          src={item.poster}
+                          alt={item.title}
+                          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                        />
+                      </div>
+                      <div style={{ padding: 14, display: "grid", gap: 8 }}>
+                        <div style={{ color: "#7dd3fc", fontSize: 11, fontWeight: 800, letterSpacing: "0.12em", textTransform: "uppercase" }}>
+                          {item.nodeTitle || "MAMO Relay"}
+                        </div>
+                        <strong style={{ color: "#fff", fontSize: 18, lineHeight: 1.05 }}>{item.title}</strong>
+                        <span style={{ color: "#94a3b8", fontSize: 12 }}>
+                          {item.kind === "p2p"
+                            ? `${item.peers || 0} peers actifs`
+                            : `${item.replicaCount || 0}/${item.desiredReplicas || 0} replicas | ${String(item.syncState || "ready").toUpperCase()}`}
+                        </span>
                       </div>
                     </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {displayedItems.length ? (
+              <div
+                style={{
+                  display: "grid",
+                  gap: 18,
+                  gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))",
+                }}
+              >
+                {displayedItems.map((item) => (
+                  <article
+                    key={item.id}
+                    style={{
+                      borderRadius: 24,
+                      overflow: "hidden",
+                      border: "1px solid rgba(148,163,184,0.14)",
+                      background: "rgba(5, 12, 24, 0.94)",
+                      boxShadow: "0 14px 40px rgba(2, 6, 23, 0.34)",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => openPlayer(item)}
+                      style={{
+                        width: "100%",
+                        border: 0,
+                        padding: 0,
+                        background: "transparent",
+                        cursor: "pointer",
+                        textAlign: "left",
+                      }}
+                    >
+                      <div style={{ position: "relative", minHeight: 220, background: "#020617" }}>
+                        <img
+                          src={item.poster}
+                          alt={item.title}
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            minHeight: 220,
+                            objectFit: "cover",
+                            display: "block",
+                            opacity: 0.82,
+                          }}
+                        />
+                        <div
+                          style={{
+                            position: "absolute",
+                            inset: 0,
+                            background: "linear-gradient(to top, rgba(2,6,23,0.95), rgba(2,6,23,0.08) 54%)",
+                          }}
+                        />
+                        <div
+                          style={{
+                            position: "absolute",
+                            top: 14,
+                            left: 14,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 6,
+                            padding: "6px 10px",
+                            borderRadius: 999,
+                            background: "rgba(6, 182, 212, 0.18)",
+                            border: "1px solid rgba(34, 211, 238, 0.24)",
+                            color: "#67e8f9",
+                            fontSize: 10,
+                            fontWeight: 800,
+                            letterSpacing: "0.14em",
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          <Play size={12} />
+                          Watch
+                        </div>
+                        <div
+                          style={{
+                            position: "absolute",
+                            right: 14,
+                            top: 14,
+                            padding: "6px 10px",
+                            borderRadius: 999,
+                            background: "rgba(2, 6, 23, 0.76)",
+                            border: "1px solid rgba(148, 163, 184, 0.16)",
+                            color: "#e2e8f0",
+                            fontSize: 10,
+                            fontWeight: 800,
+                            letterSpacing: "0.12em",
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          {item.kind === "p2p" ? "P2P" : item.source === "hls" ? "HLS" : "LIVE"}
+                        </div>
+                        <div style={{ position: "absolute", left: 16, right: 16, bottom: 16 }}>
+                          <div style={{ color: "#7dd3fc", fontSize: 11, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase" }}>
+                            {item.nodeTitle || "MAMO Relay"}
+                          </div>
+                          <h3
+                            style={{
+                              margin: "8px 0 0",
+                              color: "#ffffff",
+                              fontSize: 24,
+                              lineHeight: 1.02,
+                              textTransform: "uppercase",
+                              fontStyle: "italic",
+                            }}
+                          >
+                            {item.title}
+                          </h3>
+                        </div>
+                      </div>
+                    </button>
+
+                    <div style={{ padding: 16, display: "grid", gap: 12 }}>
+                      <p style={{ margin: 0, color: "#cbd5e1", fontSize: 13, lineHeight: 1.55 }}>{item.synopsis}</p>
+
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        <span className="cdn-hub-pill" style={{ background: "rgba(15, 23, 42, 0.78)" }}>
+                          <Database size={14} color="#cbd5f5" />
+                          <span>hash {String(item.hash || "local").slice(0, 10)}</span>
+                        </span>
+                        <span className="cdn-hub-pill" style={{ background: "rgba(34, 197, 94, 0.12)" }}>
+                          <Wifi size={14} color="#4ade80" />
+                          <span>{item.kind === "p2p" ? `${item.peers || 0} peers` : `${item.replicaCount || 0}/${item.desiredReplicas || 0} replicas`}</span>
+                        </span>
+                        <span className="cdn-hub-pill" style={{ background: "rgba(245, 158, 11, 0.12)" }}>
+                          <RefreshCw size={14} color="#f59e0b" />
+                          <span>{String(item.syncState || "ready").toUpperCase()} | {item.freshness || "fresh"}</span>
+                        </span>
+                      </div>
+
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button type="button" className="cdn-icon-btn" onClick={() => openPlayer(item)} style={{ minWidth: 150 }}>
+                          <Play size={18} />
+                          <span>Lire maintenant</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="cdn-icon-btn"
+                          onClick={() => window.open(resolvePlayableUrl(item), "_blank", "noopener,noreferrer")}
+                          style={{ minWidth: 150 }}
+                        >
+                          <ExternalLink size={18} />
+                          <span>Source directe</span>
+                        </button>
+                      </div>
+                    </div>
                   </article>
-                );
-              })}
-            </div>
+                ))}
+              </div>
+            ) : (
+              <div className="card">
+                <h3 style={{ marginTop: 0 }}>Aucune source visible pour {currentTabLabel}</h3>
+                <p className="muted" style={{ marginBottom: 0 }}>
+                  Le registre est raccorde, mais aucun contenu exploitable n'a encore ete projete dans cet onglet.
+                </p>
+              </div>
+            )}
           </div>
 
           <footer className="cdn-footer">MAMO TITAN v7.2.0 - CINEMA DECENTRALISE</footer>
