@@ -356,6 +356,14 @@ function describeSettledSource(result, ok, detail, missingLabel) {
   };
 }
 
+async function parseJsonSafely(response, fallbackValue = null) {
+  try {
+    return await response.json();
+  } catch {
+    return fallbackValue;
+  }
+}
+
 function readStreamProState() {
   if (typeof window === "undefined") return null;
   try {
@@ -887,6 +895,36 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   }, [registrySnapshot]);
 
   useEffect(() => {
+    const streamProBridge = buildStreamProBridgePayload(readStreamProState());
+    if (!streamProBridge) return;
+    const cachedPayload = mergeLiveRegistrySnapshot({
+      registryPayload: null,
+      signalHubPayload: streamProBridge.signalHubPayload,
+      cdnServicePayload: streamProBridge.cdnServicePayload,
+      meshServicePayload: streamProBridge.meshServicePayload,
+      meshPayload: streamProBridge.meshPayload,
+    });
+    setRegistrySnapshot((current) => current || cachedPayload);
+    setSourceDiagnostics((current) => {
+      if (current.mergeSources.length || current.refreshedAt) return current;
+      return buildSourceDiagnostics({
+        registryResult: null,
+        hubResult: null,
+        cdnServiceResult: null,
+        meshServiceResult: null,
+        meshResult: null,
+        registryPayload: null,
+        hubPayload: null,
+        cdnServicePayload: null,
+        meshServicePayload: null,
+        meshPayload: null,
+        streamProBridge,
+        mergedPayload: cachedPayload,
+      });
+    });
+  }, []);
+
+  useEffect(() => {
     return () => {
       mountedRef.current = false;
       syncCancelledRef.current = true;
@@ -913,11 +951,24 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
 
   const refreshRegistry = useCallback(async (silent = false) => {
     if (!silent && mountedRef.current) setRegistryLoading(true);
-    try {
-      const headers = {};
-      if (authToken) headers.Authorization = `Bearer ${authToken}`;
-      const streamProBridge = buildStreamProBridgePayload(readStreamProState());
+    const headers = {};
+    if (authToken) headers.Authorization = `Bearer ${authToken}`;
+    const streamProBridge = buildStreamProBridgePayload(readStreamProState());
+    let registryResult = null;
+    let hubResult = null;
+    let cdnServiceResult = null;
+    let meshServiceResult = null;
+    let meshResult = null;
+    let registryPayload = null;
+    let hubPayload = null;
+    let cdnServicePayload = null;
+    let meshServicePayload = null;
+    let meshPayload = null;
+    let payload = null;
+    let diagnostics = null;
+    let refreshError = null;
 
+    try {
       if (mountedRef.current && !registrySnapshotRef.current && streamProBridge) {
         const cachedPayload = mergeLiveRegistrySnapshot({
           registryPayload: null,
@@ -944,7 +995,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
         setRegistryError("");
       }
 
-      const [registryResult, hubResult, cdnServiceResult, meshServiceResult, meshResult] = await Promise.allSettled([
+      [registryResult, hubResult, cdnServiceResult, meshServiceResult, meshResult] = await Promise.allSettled([
         fetchWithTimeout(buildCdnRegistryUrl(api, userAddress), { headers }),
         fetchWithTimeout(buildSignalHubUrl(api, userAddress), { headers }),
         fetchWithTimeout(buildCdnServiceUrl(api), { headers }),
@@ -952,29 +1003,23 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
         fetchWithTimeout(buildMeshSnapshotUrl(api), { headers }),
       ]);
 
-      let registryPayload = null;
-      let hubPayload = null;
-      let cdnServicePayload = null;
-      let meshServicePayload = null;
-      let meshPayload = null;
-
       if (registryResult.status === "fulfilled" && registryResult.value.ok) {
-        registryPayload = await registryResult.value.json();
+        registryPayload = await parseJsonSafely(registryResult.value, {});
       }
       if (hubResult.status === "fulfilled" && hubResult.value.ok) {
-        hubPayload = await hubResult.value.json();
+        hubPayload = await parseJsonSafely(hubResult.value, {});
       }
       if (cdnServiceResult.status === "fulfilled" && cdnServiceResult.value.ok) {
-        cdnServicePayload = await cdnServiceResult.value.json();
+        cdnServicePayload = await parseJsonSafely(cdnServiceResult.value, {});
       }
       if (meshServiceResult.status === "fulfilled" && meshServiceResult.value.ok) {
-        meshServicePayload = await meshServiceResult.value.json();
+        meshServicePayload = await parseJsonSafely(meshServiceResult.value, {});
       }
       if (meshResult.status === "fulfilled" && meshResult.value.ok) {
-        meshPayload = await meshResult.value.json();
+        meshPayload = await parseJsonSafely(meshResult.value, {});
       }
 
-      const payload = mergeLiveRegistrySnapshot({
+      payload = mergeLiveRegistrySnapshot({
         registryPayload,
         signalHubPayload: hubPayload || streamProBridge?.signalHubPayload || null,
         cdnServicePayload: cdnServicePayload || streamProBridge?.cdnServicePayload || null,
@@ -982,7 +1027,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
         meshPayload: meshPayload || streamProBridge?.meshPayload || null,
       });
 
-      const diagnostics = buildSourceDiagnostics({
+      diagnostics = buildSourceDiagnostics({
         registryResult,
         hubResult,
         cdnServiceResult,
@@ -999,12 +1044,41 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
 
       if (!payload?.catalog?.length && !payload?.nodes?.length && !payload?.signalHub) {
         const registryStatus = registryResult.status === "fulfilled" ? registryResult.value.status : "unreachable";
-        throw new Error(`cdn_registry_${registryStatus}`);
+        refreshError = new Error(`cdn_registry_${registryStatus}`);
       }
+    } catch (error) {
+      refreshError = error;
+    } finally {
+      const mergedPayload = payload || (streamProBridge
+        ? mergeLiveRegistrySnapshot({
+            registryPayload,
+            signalHubPayload: hubPayload || streamProBridge.signalHubPayload || null,
+            cdnServicePayload: cdnServicePayload || streamProBridge.cdnServicePayload || null,
+            meshServicePayload: meshServicePayload || streamProBridge.meshServicePayload || null,
+            meshPayload: meshPayload || streamProBridge.meshPayload || null,
+          })
+        : null);
+
+      const finalDiagnostics = diagnostics || buildSourceDiagnostics({
+        registryResult,
+        hubResult,
+        cdnServiceResult,
+        meshServiceResult,
+        meshResult,
+        registryPayload,
+        hubPayload,
+        cdnServicePayload,
+        meshServicePayload,
+        meshPayload,
+        streamProBridge,
+        mergedPayload,
+      });
 
       if (mountedRef.current) {
-        setRegistrySnapshot(payload);
-        setSourceDiagnostics(diagnostics);
+        if (mergedPayload) {
+          setRegistrySnapshot(mergedPayload);
+        }
+        setSourceDiagnostics(finalDiagnostics);
         const liveAvailable = Boolean(
           hubPayload ||
           meshPayload ||
@@ -1013,22 +1087,11 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
           streamProBridge?.signalHubPayload ||
           streamProBridge?.meshPayload
         );
-        setRegistryError(registryPayload || liveAvailable ? "" : "cdn_registry_unavailable");
+        setRegistryError(refreshError ? String(refreshError?.message || "cdn_registry_unavailable") : (registryPayload || liveAvailable ? "" : "cdn_registry_unavailable"));
       }
-      return payload;
-    } catch (error) {
-      if (mountedRef.current) {
-        setRegistryError(String(error?.message || "cdn_registry_unavailable"));
-        setSourceDiagnostics((current) => ({
-          ...current,
-          refreshedAt: new Date().toISOString(),
-          mergeSources: current.mergeSources || [],
-        }));
-      }
-      return null;
-    } finally {
       if (!silent && mountedRef.current) setRegistryLoading(false);
     }
+    return payload;
   }, [api, authToken, userAddress]);
 
   const toggleCdnService = useCallback(async (desiredRunning) => {
