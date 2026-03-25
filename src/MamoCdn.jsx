@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Database,
@@ -162,6 +162,10 @@ function buildCdnRegistryUrl(api, userAddress) {
   return query ? `${base}?${query}` : base;
 }
 
+function buildCdnServiceUrl(api, action = "") {
+  return action ? api(`/api/platform/cdn/service/${action}`) : api("/api/platform/cdn/service");
+}
+
 function createFallbackCatalog() {
   const generated = [...BASE_CATALOG];
   for (let i = 0; i < 12; i += 1) {
@@ -247,6 +251,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   const hlsRef = useRef(null);
   const playerRootRef = useRef(null);
   const syncCancelledRef = useRef(false);
+  const mountedRef = useRef(true);
   const previewVideoRefs = useRef(new Map());
   const previewIntervalRef = useRef(0);
   const previewPlayPromiseRef = useRef(null);
@@ -282,6 +287,8 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   );
   const cdnNodes = useMemo(() => registrySnapshot?.nodes || [], [registrySnapshot]);
   const syncQueue = useMemo(() => registrySnapshot?.syncQueue || [], [registrySnapshot]);
+  const replicationService = registrySnapshot?.service || {};
+  const replicationHistory = useMemo(() => registrySnapshot?.replicationHistory || [], [registrySnapshot]);
   const registrySummary = registrySnapshot?.summary || {
     contentCount: mediaData.length,
     nodeCount: 0,
@@ -292,9 +299,11 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   };
   const meshInfo = registrySnapshot?.signalHub?.mesh?.snapshot || null;
   const distribution = registrySnapshot?.distribution || {};
+  const latestReplicationJob = replicationService.latestJob || null;
 
   useEffect(() => {
     return () => {
+      mountedRef.current = false;
       syncCancelledRef.current = true;
       window.clearInterval(previewIntervalRef.current);
       if (hlsRef.current) {
@@ -317,42 +326,58 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     return () => media.removeListener(syncTouchMode);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const refreshRegistry = async (silent = false) => {
-      if (!silent) setRegistryLoading(true);
-      try {
-        const headers = {};
-        if (authToken) headers.Authorization = `Bearer ${authToken}`;
-        const response = await fetch(buildCdnRegistryUrl(api, userAddress), { headers });
-        if (!response.ok) {
-          throw new Error(`cdn_registry_${response.status}`);
-        }
-        const payload = await response.json();
-        if (!cancelled) {
-          setRegistrySnapshot(payload);
-          setRegistryError("");
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setRegistryError(String(error?.message || "cdn_registry_unavailable"));
-        }
-      } finally {
-        if (!cancelled && !silent) setRegistryLoading(false);
+  const refreshRegistry = useCallback(async (silent = false) => {
+    if (!silent && mountedRef.current) setRegistryLoading(true);
+    try {
+      const headers = {};
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const response = await fetch(buildCdnRegistryUrl(api, userAddress), { headers });
+      if (!response.ok) {
+        throw new Error(`cdn_registry_${response.status}`);
       }
-    };
+      const payload = await response.json();
+      if (mountedRef.current) {
+        setRegistrySnapshot(payload);
+        setRegistryError("");
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setRegistryError(String(error?.message || "cdn_registry_unavailable"));
+      }
+    } finally {
+      if (!silent && mountedRef.current) setRegistryLoading(false);
+    }
+  }, [api, authToken, userAddress]);
 
+  const toggleCdnService = useCallback(async (desiredRunning) => {
+    try {
+      const headers = {};
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const response = await fetch(buildCdnServiceUrl(api, desiredRunning ? "start" : "stop"), {
+        method: "POST",
+        headers,
+      });
+      if (!response.ok) {
+        throw new Error(`cdn_service_${response.status}`);
+      }
+      await refreshRegistry(true);
+    } catch (error) {
+      if (mountedRef.current) {
+        setRegistryError(String(error?.message || "cdn_service_unavailable"));
+      }
+    }
+  }, [api, authToken, refreshRegistry]);
+
+  useEffect(() => {
     refreshRegistry(false);
     const intervalId = window.setInterval(() => {
       refreshRegistry(true);
-    }, 12000);
+    }, 8000);
 
     return () => {
-      cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [api, authToken, userAddress]);
+  }, [refreshRegistry]);
 
   useEffect(() => {
     if (!playerItem || playerItem.source === "youtube" || playerItem.kind === "external") {
@@ -523,7 +548,11 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
 
     if (syncCancelledRef.current) return;
     await new Promise((resolve) => window.setTimeout(resolve, 700));
-    if (!syncCancelledRef.current) setMode("app");
+    if (!syncCancelledRef.current) {
+      await toggleCdnService(true);
+      await refreshRegistry(true);
+      setMode("app");
+    }
   };
 
   const stopPreview = async (itemId) => {
@@ -764,6 +793,18 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
                   <Radio size={18} />
                 </div>
               </div>
+              <div className="card">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <div>
+                    <p className="muted" style={{ margin: 0, fontSize: 12 }}>Worker CDN</p>
+                    <h3 style={{ margin: "8px 0 0" }}>{replicationService.running ? "actif" : "pause"}</h3>
+                    <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                      jobs {replicationService.processedJobs || 0} | {replicationService.intervalSeconds || 0}s
+                    </p>
+                  </div>
+                  <RefreshCw size={18} />
+                </div>
+              </div>
             </div>
 
             <div className="card" style={{ marginBottom: 16 }}>
@@ -779,6 +820,16 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
                     <Shield size={14} color="#22d3ee" />
                     <span>{distribution.health || "watch"}</span>
                   </span>
+                  <span className="cdn-hub-pill" style={{ background: replicationService.running ? "rgba(34, 197, 94, 0.12)" : "rgba(245, 158, 11, 0.12)" }}>
+                    <RefreshCw size={14} color={replicationService.running ? "#22c55e" : "#f59e0b"} />
+                    <span>{replicationService.running ? "replication active" : "replication stop"}</span>
+                  </span>
+                  <button type="button" className="cdn-icon-btn" onClick={() => toggleCdnService(!replicationService.running)} style={{ minWidth: 44 }}>
+                    {replicationService.running ? <Pause size={18} /> : <Play size={18} />}
+                  </button>
+                  <button type="button" className="cdn-icon-btn" onClick={() => refreshRegistry(false)} style={{ minWidth: 44 }}>
+                    <RefreshCw size={18} />
+                  </button>
                   <button type="button" className="cdn-icon-btn" onClick={startConnection} style={{ minWidth: 44 }}>
                     <Terminal size={18} />
                   </button>
@@ -786,6 +837,11 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
               </div>
               {registryError ? <p className="warn" style={{ marginTop: 10 }}>Registre: {registryError}</p> : null}
               {registryLoading ? <p className="muted" style={{ marginTop: 10 }}>Chargement du registre distribue...</p> : null}
+              {latestReplicationJob ? (
+                <p className="muted" style={{ marginTop: 10 }}>
+                  Dernier job: {latestReplicationJob.title} vers {latestReplicationJob.targetNodeName} | {latestReplicationJob.afterReplicas}/{latestReplicationJob.desiredReplicas} replicas
+                </p>
+              ) : null}
             </div>
 
             <div className="grid two" style={{ marginBottom: 16, alignItems: "start" }}>
@@ -818,6 +874,10 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
                         <span className="muted">Stockage</span>
                         <span>{node.usedGb} / {node.capacityGb} GB</span>
                       </div>
+                      <div className="row" style={{ marginTop: 6, justifyContent: "space-between", fontSize: 12 }}>
+                        <span className="muted">Replications</span>
+                        <span>{node.replicatedCount || 0} | {node.storedContentCount || 0} contenus</span>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -844,7 +904,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
                           <div>
                             <strong style={{ color: "#fff" }}>{job.title}</strong>
                             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                              {job.reason} | {job.currentReplicas}/{job.desiredReplicas} replicas
+                              {job.reason} | {job.currentReplicas}/{job.desiredReplicas} replicas | {job.state}
                             </div>
                           </div>
                           <span className={job.priority === "critical" ? "warn" : "ok"} style={{ fontSize: 12 }}>
@@ -852,7 +912,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
                           </span>
                         </div>
                         <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-                          Cible: {job.targetNodeName}
+                          Cible: {job.targetNodeName} | progression {job.progress || 0}%
                         </div>
                       </div>
                     ))
@@ -860,6 +920,43 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
                     <p className="muted" style={{ margin: 0 }}>Aucune replication en attente.</p>
                   )}
                 </div>
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <h3 style={{ margin: 0 }}>Activite de replication</h3>
+                <Database size={18} />
+              </div>
+              <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                {replicationHistory.length ? (
+                  replicationHistory.slice(0, 6).map((job) => (
+                    <div
+                      key={`${job.id}-${job.timestampUtc}`}
+                      style={{
+                        border: "1px solid rgba(0,238,255,0.18)",
+                        borderRadius: 12,
+                        background: "rgba(5,16,31,0.92)",
+                        padding: 12,
+                      }}
+                    >
+                      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+                        <div>
+                          <strong style={{ color: "#fff" }}>{job.title}</strong>
+                          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                            {job.reason} | {job.beforeReplicas} -> {job.afterReplicas} replicas
+                          </div>
+                        </div>
+                        <span className="ok" style={{ fontSize: 12 }}>{job.priority}</span>
+                      </div>
+                      <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+                        {job.targetNodeName} | {job.timestampUtc}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="muted" style={{ margin: 0 }}>Le worker n'a pas encore traite de job.</p>
+                )}
               </div>
             </div>
 
