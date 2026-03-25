@@ -37,7 +37,7 @@ const PANELS = [
 
 const MAMO_MESH_CENTER_MHZ = 1561.098;
 const MAMO_MESH_SPAN_KHZ = 1000;
-const MAMO_MESH_BIN_KHZ = 7.8125;
+const MAMO_MESH_BIN_KHZ = 15.625;
 const MAMO_MESH_GAIN_DB = 28;
 const MAMO_MESH_INTEGRATION_SECONDS = 1;
 
@@ -46,6 +46,7 @@ const randomId = () => Math.random().toString(36).slice(2, 10).toUpperCase();
 const nowStamp = () => new Date().toLocaleTimeString("fr-CA", { hour12: false });
 const shortAddress = (address) => (!address ? "-" : `${address.slice(0, 6)}...${address.slice(-4)}`);
 const formatFrequencyMHz = (value) => (typeof value === "number" ? (value / 1_000_000).toFixed(4) : "-");
+const formatSigned = (value, digits = 2) => (typeof value === "number" ? `${value >= 0 ? "+" : ""}${value.toFixed(digits)}` : "-");
 
 function loadSavedState() {
   try {
@@ -139,6 +140,12 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
     sdrBandwidthKHz: 0,
     scanLatencyMs: 0,
     sdrActivePeaks: 0,
+    sdrSnrDb: 0,
+    sdrNoiseMeanDb: 0,
+    sdrOffsetMHz: 0,
+    sdrLockAcquired: false,
+    sdrMeshReady: false,
+    sdrTimestampUtc: "",
     blockEvents: 0,
     purchaseOrders: 0,
     alerts: 0,
@@ -267,6 +274,12 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
       let sdrBandwidthKHz = 0;
       let scanLatencyMs = 0;
       let sdrActivePeaks = 0;
+      let sdrSnrDb = 0;
+      let sdrNoiseMeanDb = 0;
+      let sdrOffsetMHz = 0;
+      let sdrLockAcquired = false;
+      let sdrMeshReady = false;
+      let sdrTimestampUtc = "";
       try {
         const res = await fetch(api("/api/defender/ping"));
         const data = await res.json();
@@ -277,49 +290,42 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
       }
 
       try {
-        const sdrHealthRes = await fetch(api("/api/sdr/health"), { headers: authHeaders });
-        const sdrHealthData = await sdrHealthRes.json();
-        if (!sdrHealthRes.ok) {
-          throw new Error(sdrHealthData?.detail || "sdr_health_failed");
+        const meshRes = await fetch(api("/api/sdr/mesh?force=true"), { headers: authHeaders });
+        const meshData = await meshRes.json();
+        if (!meshRes.ok) {
+          throw new Error(meshData?.detail || "sdr_mesh_failed");
         }
-        sdrBridge = sdrHealthData?.connected ? "connected" : sdrHealthData?.status || "no_device";
+        setSdrSnapshot(meshData);
+        sdrBridge = "connected";
+        sdrPeakDb = Number(meshData?.peakPowerDb || 0);
+        sdrPeakHz = Number(meshData?.peakFrequencyMHz || 0) * 1_000_000;
+        sdrBandwidthKHz = Number(meshData?.spanKHz || 0);
+        scanLatencyMs = Number(meshData?.scanDurationMs || 0);
+        sdrActivePeaks = Number(meshData?.activePeakCount || 0);
+        sdrSnrDb = Number(meshData?.snrDb || 0);
+        sdrNoiseMeanDb = Number(meshData?.noiseMeanDb || 0);
+        sdrOffsetMHz = Number(meshData?.offsetMHz || 0);
+        sdrLockAcquired = Boolean(meshData?.lockAcquired);
+        sdrMeshReady = Boolean(meshData?.meshReady);
+        sdrTimestampUtc = meshData?.timestampUtc || "";
         nextLogs.push(buildLog({
           type: "SDR",
-          title: "Pont SDR detecte",
-          payload: sdrHealthData?.connected
-            ? `${sdrHealthData?.device?.deviceName || "Dongle"} · ${sdrHealthData?.device?.tuner || "tuner inconnu"}`
-            : sdrHealthData?.message || "Aucun dongle SDR detecte",
-          source: "rtl_test",
-          details: sdrHealthData?.device || {},
-          severity: sdrHealthData?.connected ? "ok" : "warning",
+          title: "Snapshot mesh MAMO",
+          payload: `Lock ${sdrLockAcquired ? "oui" : "non"} · SNR ${sdrSnrDb.toFixed(2)} dB · offset ${formatSigned(sdrOffsetMHz, 4)} MHz`,
+          source: "mesh-sdr",
+          details: {
+            timestampUtc: sdrTimestampUtc,
+            peakFrequencyMHz: meshData?.peakFrequencyMHz,
+            peakPowerDb: meshData?.peakPowerDb,
+            noiseMeanDb: meshData?.noiseMeanDb,
+            snrDb: meshData?.snrDb,
+            offsetMHz: meshData?.offsetMHz,
+            lockAcquired: meshData?.lockAcquired,
+            meshReady: meshData?.meshReady,
+            quality: meshData?.quality,
+          },
+          severity: sdrMeshReady ? "ok" : sdrLockAcquired ? "warning" : "critical",
         }));
-
-        if (sdrHealthData?.connected) {
-          const sdrScanRes = await fetch(
-            api(`/api/sdr/scan?center_mhz=${MAMO_MESH_CENTER_MHZ}&span_khz=${MAMO_MESH_SPAN_KHZ}&bin_khz=${MAMO_MESH_BIN_KHZ}&gain_db=${MAMO_MESH_GAIN_DB}&integration_seconds=${MAMO_MESH_INTEGRATION_SECONDS}`),
-            { headers: authHeaders }
-          );
-          const sdrScanData = await sdrScanRes.json();
-          if (!sdrScanRes.ok) {
-            throw new Error(sdrScanData?.detail || "sdr_scan_failed");
-          }
-          setSdrSnapshot(sdrScanData);
-          sdrPeakDb = Number(sdrScanData?.summary?.peakPowerDb || 0);
-          sdrPeakHz = Number(sdrScanData?.summary?.peakFrequencyHz || 0);
-          sdrBandwidthKHz = Number(sdrScanData?.spanKHz || 0);
-          scanLatencyMs = Number(sdrScanData?.summary?.scanDurationMs || 0);
-          sdrActivePeaks = Number(sdrScanData?.summary?.activePeakCount || 0);
-          nextLogs.push(buildLog({
-            type: "SDR",
-            title: "Scan SDR reel",
-            payload: `Pic ${formatFrequencyMHz(sdrPeakHz)} MHz · ${sdrPeakDb.toFixed(2)} dB · ${sdrActivePeaks} pics`,
-            source: "rtl_power",
-            details: sdrScanData?.summary || {},
-            severity: "ok",
-          }));
-        } else {
-          setSdrSnapshot(null);
-        }
       } catch (error) {
         setSdrSnapshot(null);
         sdrBridge = error?.message === "missing_authorization" || error?.message === "insufficient_permissions" ? "protected" : "unavailable";
@@ -336,7 +342,8 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
       const threatScore = clamp(
         (defenderStatus === "ok" ? 8 : 30) +
           (sdrBridge === "connected" ? 4 : 32) +
-          (sdrActivePeaks > 5 ? 8 : 0) +
+          (sdrMeshReady ? 0 : sdrLockAcquired ? 10 : 24) +
+          (sdrSnrDb < 10 ? Math.ceil((10 - sdrSnrDb) * 2) : 0) +
           anomalyCount * 4,
         0,
         100
@@ -379,6 +386,12 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
         sdrBandwidthKHz,
         scanLatencyMs,
         sdrActivePeaks,
+        sdrSnrDb,
+        sdrNoiseMeanDb,
+        sdrOffsetMHz,
+        sdrLockAcquired,
+        sdrMeshReady,
+        sdrTimestampUtc,
         blockEvents,
         purchaseOrders,
         alerts: anomalyCount,
@@ -415,7 +428,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
   const selectedLog = logs.find((item) => item.id === selectedLogId) || filteredLogs[0] || null;
   const registryRows = useMemo(() => filteredLogs.slice(0, 8).map((log, idx) => ({ key: `REG-${idx + 1}`, source: log.source, type: log.type, stamp: log.time, checksum: `${log.id.slice(0, 6)}-${log.type.slice(0, 3)}-${idx + 1}` })), [filteredLogs]);
   const sdrTopBins = useMemo(
-    () => (sdrSnapshot?.bins ? [...sdrSnapshot.bins].sort((a, b) => b.powerDb - a.powerDb).slice(0, 5) : []),
+    () => (sdrSnapshot?.activePeaks ? sdrSnapshot.activePeaks : sdrSnapshot?.scan?.summary?.activePeaks || []),
     [sdrSnapshot]
   );
 
@@ -468,11 +481,11 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
             </div>
           </div>
 
-          {panel === "overview" && <div className="grid two"><MetricBox label="Bande SDR" value={`${metrics.sdrBandwidthKHz} kHz`} icon={Activity} /><MetricBox label="Latence scan" value={`${metrics.scanLatencyMs} ms`} icon={Gauge} /><MetricBox label="Pics SDR" value={metrics.sdrActivePeaks} icon={Network} /><MetricBox label="Events chain" value={metrics.blockEvents} icon={Database} /><MetricBox label="Ordres banking" value={metrics.purchaseOrders} icon={Wallet} /><MetricBox label="Risque reel" value={`${metrics.threatScore}/100`} icon={Shield} /><div className="card"><h3>Etat du pont</h3><div className="tcv-list"><div className="tcv-list-item"><div><strong>Frequence MAMO</strong><p>Canal mesh principal</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{MAMO_MESH_CENTER_MHZ} MHz</span></div><div className="tcv-list-item"><div><strong>Defender</strong><p>Source backend</p></div><span className={metrics.defenderStatus === "ok" ? "ok" : "warn"}>{metrics.defenderStatus}</span></div><div className="tcv-list-item"><div><strong>SDR live</strong><p>{sdrSnapshot?.device?.deviceName || "Pont materiel"}</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrBridge}</span></div><div className="tcv-list-item"><div><strong>Pic radio</strong><p>Dernier scan reel</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrPeakHz ? `${formatFrequencyMHz(metrics.sdrPeakHz)} MHz` : "-"}</span></div><div className="tcv-list-item"><div><strong>Puissance pic</strong><p>Dernier scan reel</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrPeakDb ? `${metrics.sdrPeakDb.toFixed(2)} dB` : "-"}</span></div><div className="tcv-list-item"><div><strong>Devices</strong><p>Detection navigateur</p></div><span className="ok">{metrics.devicesDetected}</span></div></div></div><div className="card"><h3>Distribution</h3><p className="muted">Le moteur publie un export local dans `mamo-stream-pro-export` et emet l'evenement `mamo-stream-pro:update` pour aider les autres interfaces MAMO cote client.</p></div></div>}
+          {panel === "overview" && <div className="grid two"><MetricBox label="Bande SDR" value={`${metrics.sdrBandwidthKHz} kHz`} icon={Activity} /><MetricBox label="Latence scan" value={`${metrics.scanLatencyMs} ms`} icon={Gauge} /><MetricBox label="SNR" value={`${metrics.sdrSnrDb.toFixed(2)} dB`} icon={Radio} /><MetricBox label="Offset" value={`${formatSigned(metrics.sdrOffsetMHz, 4)} MHz`} icon={Network} /><MetricBox label="Lock" value={metrics.sdrLockAcquired ? "Oui" : "Non"} icon={Lock} /><MetricBox label="Events chain" value={metrics.blockEvents} icon={Database} /><MetricBox label="Ordres banking" value={metrics.purchaseOrders} icon={Wallet} /><MetricBox label="Risque reel" value={`${metrics.threatScore}/100`} icon={Shield} /><div className="card"><h3>Etat du pont</h3><div className="tcv-list"><div className="tcv-list-item"><div><strong>Frequence MAMO</strong><p>Canal mesh principal</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{MAMO_MESH_CENTER_MHZ} MHz</span></div><div className="tcv-list-item"><div><strong>UTC</strong><p>Horodatage de reference du snapshot</p></div><span className="ok">{metrics.sdrTimestampUtc || "-"}</span></div><div className="tcv-list-item"><div><strong>Mesh ready</strong><p>Synchro exploitable pour le reseau</p></div><span className={metrics.sdrMeshReady ? "ok" : "warn"}>{metrics.sdrMeshReady ? "oui" : "non"}</span></div><div className="tcv-list-item"><div><strong>Bruit moyen</strong><p>Niveau de fond radio</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrNoiseMeanDb ? `${metrics.sdrNoiseMeanDb.toFixed(2)} dB` : "-"}</span></div><div className="tcv-list-item"><div><strong>Pic radio</strong><p>Dernier scan reel</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrPeakHz ? `${formatFrequencyMHz(metrics.sdrPeakHz)} MHz` : "-"}</span></div><div className="tcv-list-item"><div><strong>Devices</strong><p>Detection navigateur</p></div><span className="ok">{metrics.devicesDetected}</span></div></div></div><div className="card"><h3>Distribution</h3><p className="muted">Le moteur publie un export local dans `mamo-stream-pro-export`, emet l'evenement `mamo-stream-pro:update` et peut etre alimente en continu par `backend/scripts/mesh_sdr_probe.py`.</p></div></div>}
 
           {panel === "feed" && <div className="grid two" style={{ gridTemplateColumns: "minmax(0,1fr) 320px" }}><div className="card"><h3>Flux live</h3><div ref={feedRef} className="tcv-terminal">{filteredLogs.length ? filteredLogs.map((log) => <EventRow key={log.id} log={log} active={log.id === selectedLogId} onClick={() => setSelectedLogId(log.id)} />) : <div className="muted">Aucun log pour ce filtre.</div>}</div></div><div className="card"><h3>Details</h3>{selectedLog ? <div className="tcv-list"><KV label="Type" value={selectedLog.type} /><KV label="Source" value={selectedLog.source} /><KV label="Payload" value={selectedLog.payload} />{Object.entries(selectedLog.details || {}).map(([key, value]) => <KV key={key} label={key} value={String(value)} />)}</div> : <div className="muted">Aucun evenement selectionne.</div>}</div></div>}
 
-          {panel === "scanner" && <div className="grid two"><div className="card"><h3>Scanner SDR</h3>{sdrSnapshot ? <div className="tcv-list"><KV label="Centre" value={`${sdrSnapshot.centerMHz} MHz`} /><KV label="Span" value={`${sdrSnapshot.spanKHz} kHz`} /><KV label="Latence scan" value={`${Number(sdrSnapshot.summary?.scanDurationMs || 0).toFixed(2)} ms`} /><KV label="Pics actifs" value={String(sdrSnapshot.summary?.activePeakCount || 0)} /><KV label="Pic" value={`${formatFrequencyMHz(sdrSnapshot.summary?.peakFrequencyHz)} MHz`} /><KV label="Puissance pic" value={`${Number(sdrSnapshot.summary?.peakPowerDb || 0).toFixed(2)} dB`} /><KV label="Moyenne" value={`${Number(sdrSnapshot.summary?.averagePowerDb || 0).toFixed(2)} dB`} /><KV label="Bins" value={String(sdrSnapshot.summary?.binCount || 0)} /></div> : <p className="warn">Le pont SDR ne renvoie pas encore de scan. Si tu es en public, il restera protege; en local il doit repondre via `rtl_power`.</p>}</div><div className="card"><h3>Sources reelles raccordees</h3><div className="tcv-list"><div className="tcv-list-item"><div><strong>Bridge</strong><p>/api/sdr/health + /api/sdr/scan</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrBridge}</span></div><div className="tcv-list-item"><div><strong>Dongle</strong><p>{sdrSnapshot?.device?.vendor || "RTL-SDR"}</p></div><span>{sdrSnapshot?.device?.tuner || "-"}</span></div><div className="tcv-list-item"><div><strong>Wallet</strong><p>window.ethereum</p></div><span>{walletAddress ? "OK" : "OFF"}</span></div><div className="tcv-list-item"><div><strong>Defender</strong><p>/api/defender/ping</p></div><span>{metrics.defenderStatus}</span></div><div className="tcv-list-item"><div><strong>Web3 events</strong><p>/api/web3/events/mining</p></div><span>{metrics.blockEvents}</span></div></div>{sdrTopBins.length ? <div className="tcv-list" style={{ marginTop: 12 }}>{sdrTopBins.map((bin, index) => <KV key={`${bin.frequencyHz}-${index}`} label={`Peak ${index + 1}`} value={`${formatFrequencyMHz(bin.frequencyHz)} MHz · ${bin.powerDb.toFixed(2)} dB`} />)}</div> : null}</div></div>}
+          {panel === "scanner" && <div className="grid two"><div className="card"><h3>Scanner SDR</h3>{sdrSnapshot ? <div className="tcv-list"><KV label="Timestamp UTC" value={sdrSnapshot.timestampUtc || "-"} /><KV label="Frequence cible" value={`${sdrSnapshot.targetFrequencyMHz} MHz`} /><KV label="Pic" value={`${Number(sdrSnapshot.peakFrequencyMHz || 0).toFixed(4)} MHz`} /><KV label="Puissance pic" value={`${Number(sdrSnapshot.peakPowerDb || 0).toFixed(2)} dB`} /><KV label="Bruit moyen" value={`${Number(sdrSnapshot.noiseMeanDb || 0).toFixed(2)} dB`} /><KV label="SNR" value={`${Number(sdrSnapshot.snrDb || 0).toFixed(2)} dB`} /><KV label="Offset" value={`${formatSigned(Number(sdrSnapshot.offsetMHz || 0), 4)} MHz`} /><KV label="Lock" value={sdrSnapshot.lockAcquired ? "Oui" : "Non"} /><KV label="Mesh ready" value={sdrSnapshot.meshReady ? "Oui" : "Non"} /><KV label="Qualite" value={sdrSnapshot.quality || "-"} /><KV label="Latence scan" value={`${Number(sdrSnapshot.scanDurationMs || 0).toFixed(2)} ms`} /><KV label="Bins" value={String(sdrSnapshot.binCount || 0)} /></div> : <p className="warn">Le pont SDR ne renvoie pas encore de scan. Si tu es en public, il restera protege; en local il doit repondre via `rtl_power`.</p>}</div><div className="card"><h3>Sources reelles raccordees</h3><div className="tcv-list"><div className="tcv-list-item"><div><strong>Bridge</strong><p>/api/sdr/mesh</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrBridge}</span></div><div className="tcv-list-item"><div><strong>Dongle</strong><p>{sdrSnapshot?.device?.vendor || "RTL-SDR"}</p></div><span>{sdrSnapshot?.device?.tuner || "-"}</span></div><div className="tcv-list-item"><div><strong>Wallet</strong><p>window.ethereum</p></div><span>{walletAddress ? "OK" : "OFF"}</span></div><div className="tcv-list-item"><div><strong>Defender</strong><p>/api/defender/ping</p></div><span>{metrics.defenderStatus}</span></div><div className="tcv-list-item"><div><strong>Web3 events</strong><p>/api/web3/events/mining</p></div><span>{metrics.blockEvents}</span></div></div>{sdrTopBins.length ? <div className="tcv-list" style={{ marginTop: 12 }}>{sdrTopBins.map((bin, index) => <KV key={`${bin.frequencyHz}-${index}`} label={`Peak ${index + 1}`} value={`${Number((bin.frequencyHz || 0) / 1_000_000).toFixed(4)} MHz · ${Number(bin.powerDb || 0).toFixed(2)} dB`} />)}</div> : null}</div></div>}
 
           {panel === "registry" && <div className="card"><h3>Registre local</h3><div className="table-wrap"><table className="bloomberg"><thead><tr><th>Cle</th><th>Source</th><th>Type</th><th>Horodatage</th><th>Checksum</th></tr></thead><tbody>{registryRows.map((row) => <tr key={row.key}><td>{row.key}</td><td>{row.source}</td><td>{row.type}</td><td>{row.stamp}</td><td>{row.checksum}</td></tr>)}</tbody></table></div></div>}
 
