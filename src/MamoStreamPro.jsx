@@ -44,6 +44,7 @@ const MAMO_MESH_SPAN_KHZ = 1000;
 const MAMO_MESH_BIN_KHZ = 15.625;
 const MAMO_MESH_GAIN_DB = 28;
 const MAMO_MESH_INTEGRATION_SECONDS = 1;
+const MAMO_LOCAL_BACKEND_BASE = "http://127.0.0.1:8002";
 const MAMO_STACK_MODULES = [
   {
     title: "Node MAMO",
@@ -82,13 +83,13 @@ const MAMO_MESH_LOG_SCHEMA = `{
   "meshReady": false,
   "quality": "weak-lock"
 }`;
-const MAMO_PROBE_COMMAND = `Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/sdr/mesh/service?auto_start=true | Select-Object -ExpandProperty Content
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/sdr/mesh | Select-Object -ExpandProperty Content`;
+const MAMO_PROBE_COMMAND = `Invoke-WebRequest -UseBasicParsing ${MAMO_LOCAL_BACKEND_BASE}/api/sdr/mesh/service?auto_start=true | Select-Object -ExpandProperty Content
+Invoke-WebRequest -UseBasicParsing ${MAMO_LOCAL_BACKEND_BASE}/api/sdr/mesh | Select-Object -ExpandProperty Content`;
 const MAMO_DIRECT_PROBE_COMMAND = `python backend/scripts/mesh_sdr_probe.py --watch --format json`;
-const MAMO_LOG_TAIL_COMMAND = `Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/sdr/mesh/logs?limit=20 | Select-Object -ExpandProperty Content`;
+const MAMO_LOG_TAIL_COMMAND = `Invoke-WebRequest -UseBasicParsing ${MAMO_LOCAL_BACKEND_BASE}/api/sdr/mesh/logs?limit=20 | Select-Object -ExpandProperty Content`;
 const MAMO_BACKEND_COMMANDS = `powershell -ExecutionPolicy Bypass -File "C:/Users/tommy/Documents/RoyaumeMamo/NouveauTravail/backend/scripts/start_mamo_mesh_service.ps1"
 powershell -ExecutionPolicy Bypass -File "C:/Users/tommy/Documents/RoyaumeMamo/NouveauTravail/backend/scripts/start_mamo_mesh_service.ps1" -Reload
-Invoke-WebRequest -Method Post -UseBasicParsing http://127.0.0.1:8000/api/sdr/mesh/service/start | Select-Object -ExpandProperty Content
+Invoke-WebRequest -Method Post -UseBasicParsing ${MAMO_LOCAL_BACKEND_BASE}/api/sdr/mesh/service/start | Select-Object -ExpandProperty Content
 python backend/scripts/mesh_sdr_probe.py --watch --format json
 python backend/scripts/mesh_sdr_probe.py --watch --format csv`;
 const MAMO_OPENAI_RESPONSES_CURL = `curl https://api.openai.com/v1/responses \\

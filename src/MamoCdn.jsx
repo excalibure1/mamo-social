@@ -152,7 +152,7 @@ const FALLBACK_SYNC_LINES = [
   "> HUB OPERATIONNEL.",
 ];
 
-const STREAM_PRO_STORAGE_KEY = "mamo-stream-pro-state-v2";
+const STREAM_PRO_STORAGE_KEYS = ["mamo-stream-pro-state-v3", "mamo-stream-pro-state-v2"];
 const DEFAULT_CDN_SOURCE_DIAGNOSTICS = {
   refreshedAt: "",
   mergeSources: [],
@@ -367,8 +367,11 @@ async function parseJsonSafely(response, fallbackValue = null) {
 function readStreamProState() {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(STREAM_PRO_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    for (const key of STREAM_PRO_STORAGE_KEYS) {
+      const raw = window.localStorage.getItem(key);
+      if (raw) return JSON.parse(raw);
+    }
+    return null;
   } catch {
     return null;
   }

@@ -9,7 +9,10 @@ import MamoCdn from "./MamoCdn";
 import MamoTcvStation from "./MamoTcvStation";
 import MamoStreamPro from "./MamoStreamPro";
 
-const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:8000").trim();
+const isLocalDevHost =
+  typeof window !== "undefined" && ["127.0.0.1", "localhost"].includes(window.location.hostname);
+const DEFAULT_BACKEND_URL = isLocalDevHost ? "http://127.0.0.1:8002" : "http://127.0.0.1:8000";
+const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || DEFAULT_BACKEND_URL).trim();
 const API = (path) => (BACKEND_URL ? `${BACKEND_URL}${path}` : path);
 const CHEF_ID = "mamo:identity:3D0DF572F300";
 const ELITE_PRICE_LABEL = "50$ en ETH";
@@ -24,9 +27,6 @@ const normalize = (str) =>
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
-
-const isLocalDevHost =
-  typeof window !== "undefined" && ["127.0.0.1", "localhost"].includes(window.location.hostname);
 
 const generateMamoId = () => {
   const hash = Array.from({ length: 12 }, () => Math.floor(Math.random() * 16).toString(16).toUpperCase()).join("");
