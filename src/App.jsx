@@ -1812,7 +1812,7 @@ export default function App() {
 
         {activeTab === "simq" && <SimqModule />}
 
-        {activeTab === "cdn" && <MamoCdn />}
+        {activeTab === "cdn" && <MamoCdn api={API} authToken={walletJwt} userAddress={userAddress} />}
 
         {activeTab === "tcv" && !hasPremiumAccess && (
           <section className="panel glass neon">

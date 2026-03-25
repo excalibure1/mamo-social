@@ -1,17 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
+  Database,
   ExternalLink,
   Globe,
+  HardDrive,
   Loader2,
   MapPin,
   Maximize2,
   MonitorPlay,
   Pause,
   Play,
+  Radio,
+  RefreshCw,
+  Shield,
   Terminal,
   Volume2,
   VolumeX,
+  Wifi,
 } from "lucide-react";
 
 const MASTER_P2P = [
@@ -148,6 +154,45 @@ const SYNC_LINES = [
 
 let hlsLoaderPromise = null;
 
+function buildCdnRegistryUrl(api, userAddress) {
+  const base = api("/api/platform/cdn/registry");
+  const params = new URLSearchParams();
+  if (userAddress) params.set("walletAddress", userAddress);
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
+}
+
+function createFallbackCatalog() {
+  const generated = [...BASE_CATALOG];
+  for (let i = 0; i < 12; i += 1) {
+    const base = MASTER_P2P[i % MASTER_P2P.length];
+    generated.push({
+      id: `p2p_${i}`,
+      title: `${base.title} #${i + 1}`,
+      category: "P2P",
+      kind: "p2p",
+      source: "mp4",
+      url: base.url,
+      poster: base.poster,
+      synopsis: `Source decentralisee Node #${i + 100}. Flux haute fidelite indexe par MAMO.`,
+      nodeTitle: `NODE-TX-${i + 1}`,
+      color: base.color,
+      peers: Math.floor(Math.random() * 900) + 100,
+      priority: i < 4 ? "high" : "medium",
+      freshness: "fresh",
+      replicaCount: 2,
+      desiredReplicas: 3,
+      syncState: "ready",
+      holders: [],
+    });
+  }
+  return generated;
+}
+
+function formatNodeStatus(status) {
+  return status === "online" ? "EN LIGNE" : "HORS LIGNE";
+}
+
 function loadHlsLibrary() {
   if (typeof window === "undefined") {
     return Promise.resolve(null);
@@ -197,7 +242,7 @@ function PlayerNodeCard({ item }) {
   );
 }
 
-export default function MamoCdn() {
+export default function MamoCdn({ api = (path) => path, authToken = "", userAddress = "" }) {
   const playerVideoRef = useRef(null);
   const hlsRef = useRef(null);
   const playerRootRef = useRef(null);
@@ -219,35 +264,34 @@ export default function MamoCdn() {
   const [previewItemId, setPreviewItemId] = useState(null);
   const [previewRemaining, setPreviewRemaining] = useState(15);
   const [isTouchDevice, setIsTouchDevice] = useState(false);
+  const [registrySnapshot, setRegistrySnapshot] = useState(null);
+  const [registryLoading, setRegistryLoading] = useState(false);
+  const [registryError, setRegistryError] = useState("");
 
   const mediaData = useMemo(() => {
-    const generated = [...BASE_CATALOG];
-    for (let i = 0; i < 12; i += 1) {
-      const base = MASTER_P2P[i % MASTER_P2P.length];
-      generated.push({
-        id: `p2p_${i}`,
-        title: `${base.title} #${i + 1}`,
-        category: "P2P",
-        kind: "p2p",
-        source: "mp4",
-        url: base.url,
-        poster: base.poster,
-        synopsis: `Source decentralisee Node #${i + 100}. Flux haute fidelite indexe par MAMO.`,
-        nodeTitle: `NODE-TX-${i + 1}`,
-        color: base.color,
-        peers: Math.floor(Math.random() * 900) + 100,
-      });
-    }
-    return generated.map((item) => ({
+    const source = registrySnapshot?.catalog?.length ? registrySnapshot.catalog : createFallbackCatalog();
+    return source.map((item) => ({
       ...item,
-      nodeImage: buildNodeArt(item.color),
+      nodeImage: buildNodeArt(item.color || "#06b6d4"),
     }));
-  }, []);
+  }, [registrySnapshot]);
 
   const filteredItems = useMemo(
     () => mediaData.filter((item) => item.category === currentTab),
     [mediaData, currentTab]
   );
+  const cdnNodes = useMemo(() => registrySnapshot?.nodes || [], [registrySnapshot]);
+  const syncQueue = useMemo(() => registrySnapshot?.syncQueue || [], [registrySnapshot]);
+  const registrySummary = registrySnapshot?.summary || {
+    contentCount: mediaData.length,
+    nodeCount: 0,
+    onlineNodes: 0,
+    queuedSyncJobs: 0,
+    freshAssets: 0,
+    criticalAssets: 0,
+  };
+  const meshInfo = registrySnapshot?.signalHub?.mesh?.snapshot || null;
+  const distribution = registrySnapshot?.distribution || {};
 
   useEffect(() => {
     return () => {
@@ -272,6 +316,43 @@ export default function MamoCdn() {
     media.addListener(syncTouchMode);
     return () => media.removeListener(syncTouchMode);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshRegistry = async (silent = false) => {
+      if (!silent) setRegistryLoading(true);
+      try {
+        const headers = {};
+        if (authToken) headers.Authorization = `Bearer ${authToken}`;
+        const response = await fetch(buildCdnRegistryUrl(api, userAddress), { headers });
+        if (!response.ok) {
+          throw new Error(`cdn_registry_${response.status}`);
+        }
+        const payload = await response.json();
+        if (!cancelled) {
+          setRegistrySnapshot(payload);
+          setRegistryError("");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setRegistryError(String(error?.message || "cdn_registry_unavailable"));
+        }
+      } finally {
+        if (!cancelled && !silent) setRegistryLoading(false);
+      }
+    };
+
+    refreshRegistry(false);
+    const intervalId = window.setInterval(() => {
+      refreshRegistry(true);
+    }, 12000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [api, authToken, userAddress]);
 
   useEffect(() => {
     if (!playerItem || playerItem.source === "youtube" || playerItem.kind === "external") {
@@ -636,11 +717,152 @@ export default function MamoCdn() {
 
             <div className="cdn-hub-pill">
               <MapPin size={14} color="#22c55e" />
-              <span>Saint-Gabriel Hub Active</span>
+              <span>
+                {meshInfo?.targetFrequencyMHz ? `${meshInfo.targetFrequencyMHz} MHz` : "Saint-Gabriel Hub"} | {distribution.health || "watch"}
+              </span>
             </div>
           </header>
 
           <div className="cdn-main">
+            <div className="grid two" style={{ marginBottom: 16, gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))" }}>
+              <div className="card">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <div>
+                    <p className="muted" style={{ margin: 0, fontSize: 12 }}>Catalogue dynamique</p>
+                    <h3 style={{ margin: "8px 0 0" }}>{registrySummary.contentCount}</h3>
+                  </div>
+                  <Database size={18} />
+                </div>
+              </div>
+              <div className="card">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <div>
+                    <p className="muted" style={{ margin: 0, fontSize: 12 }}>Nodes en ligne</p>
+                    <h3 style={{ margin: "8px 0 0" }}>{registrySummary.onlineNodes}/{registrySummary.nodeCount}</h3>
+                  </div>
+                  <Wifi size={18} />
+                </div>
+              </div>
+              <div className="card">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <div>
+                    <p className="muted" style={{ margin: 0, fontSize: 12 }}>File de sync</p>
+                    <h3 style={{ margin: "8px 0 0" }}>{registrySummary.queuedSyncJobs}</h3>
+                  </div>
+                  <RefreshCw size={18} />
+                </div>
+              </div>
+              <div className="card">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <div>
+                    <p className="muted" style={{ margin: 0, fontSize: 12 }}>Canal mesh</p>
+                    <h3 style={{ margin: "8px 0 0" }}>{meshInfo?.quality || "offline"}</h3>
+                    <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                      {meshInfo ? `SNR ${meshInfo.snrDb} dB | ${meshInfo.activePeakCount} pics` : "Signal en attente"}
+                    </p>
+                  </div>
+                  <Radio size={18} />
+                </div>
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" }}>
+                <div>
+                  <h3 style={{ marginBottom: 6 }}>Registre CDN distribue</h3>
+                  <p className="muted" style={{ margin: 0 }}>
+                    Hashes, priorite, fraicheur et possession des contenus a travers les nodes MAMO.
+                  </p>
+                </div>
+                <div className="row" style={{ flexWrap: "wrap" }}>
+                  <span className="cdn-hub-pill" style={{ background: "rgba(6, 182, 212, 0.12)" }}>
+                    <Shield size={14} color="#22d3ee" />
+                    <span>{distribution.health || "watch"}</span>
+                  </span>
+                  <button type="button" className="cdn-icon-btn" onClick={startConnection} style={{ minWidth: 44 }}>
+                    <Terminal size={18} />
+                  </button>
+                </div>
+              </div>
+              {registryError ? <p className="warn" style={{ marginTop: 10 }}>Registre: {registryError}</p> : null}
+              {registryLoading ? <p className="muted" style={{ marginTop: 10 }}>Chargement du registre distribue...</p> : null}
+            </div>
+
+            <div className="grid two" style={{ marginBottom: 16, alignItems: "start" }}>
+              <div className="card">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <h3 style={{ margin: 0 }}>Statut des nodes</h3>
+                  <HardDrive size={18} />
+                </div>
+                <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                  {cdnNodes.slice(0, 6).map((node) => (
+                    <div
+                      key={node.id}
+                      style={{
+                        border: "1px solid rgba(0,238,255,0.18)",
+                        borderRadius: 12,
+                        background: "rgba(5,16,31,0.92)",
+                        padding: 12,
+                      }}
+                    >
+                      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+                        <div>
+                          <strong style={{ color: "#fff" }}>{node.name}</strong>
+                          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{node.alias} | {node.meta || "Node mesh"}</div>
+                        </div>
+                        <span className={node.status === "online" ? "ok" : "warn"} style={{ fontSize: 12 }}>
+                          {formatNodeStatus(node.status)}
+                        </span>
+                      </div>
+                      <div className="row" style={{ marginTop: 8, justifyContent: "space-between", fontSize: 12 }}>
+                        <span className="muted">Stockage</span>
+                        <span>{node.usedGb} / {node.capacityGb} GB</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="card">
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <h3 style={{ margin: 0 }}>File de sync</h3>
+                  <RefreshCw size={18} />
+                </div>
+                <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                  {syncQueue.length ? (
+                    syncQueue.slice(0, 6).map((job) => (
+                      <div
+                        key={job.id}
+                        style={{
+                          border: "1px solid rgba(0,238,255,0.18)",
+                          borderRadius: 12,
+                          background: "rgba(5,16,31,0.92)",
+                          padding: 12,
+                        }}
+                      >
+                        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+                          <div>
+                            <strong style={{ color: "#fff" }}>{job.title}</strong>
+                            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                              {job.reason} | {job.currentReplicas}/{job.desiredReplicas} replicas
+                            </div>
+                          </div>
+                          <span className={job.priority === "critical" ? "warn" : "ok"} style={{ fontSize: 12 }}>
+                            {job.priority}
+                          </span>
+                        </div>
+                        <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+                          Cible: {job.targetNodeName}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="muted" style={{ margin: 0 }}>Aucune replication en attente.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
             <div className="cdn-headline">
               <h2>{currentTab === "P2P" ? "Cinema P2P" : currentTab}</h2>
               <span>{filteredItems.length} SOURCES</span>
@@ -691,7 +913,14 @@ export default function MamoCdn() {
 
                     <button type="button" className="cdn-card-meta" onClick={() => openPlayer(item)}>
                       <h3>{item.title}</h3>
-                      <span>{item.kind === "p2p" ? `PEERS: ${item.peers}` : "LIVE STREAM"}</span>
+                      <span>
+                        {item.kind === "p2p"
+                          ? `PEERS: ${item.peers}`
+                          : `SYNC ${String(item.syncState || "ready").toUpperCase()} | ${item.replicaCount || 0}/${item.desiredReplicas || 0}`}
+                      </span>
+                      <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+                        hash {item.hash?.slice(0, 10) || "local"} | {item.priority || "medium"} | {item.freshness || "fresh"}
+                      </div>
                     </button>
                   </article>
                 );
