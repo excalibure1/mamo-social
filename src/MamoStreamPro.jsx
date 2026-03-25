@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+ï»¿import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
   Bell,
   Database,
   Download,
+  Gauge,
   Lock,
   Network,
   Radio,
@@ -193,7 +194,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
       setWalletAddress(address);
       setWalletChain(chainId || "");
       setWalletStatus(address ? "Connecte" : "Deconnecte");
-      appendLog(buildLog({ type: "BLOCKCHAIN", title: "Wallet connecte", payload: address ? `Adresse ${shortAddress(address)} · chain ${chainId}` : "Connexion annulee", source: "window.ethereum", severity: address ? "ok" : "warning" }));
+      appendLog(buildLog({ type: "BLOCKCHAIN", title: "Wallet connecte", payload: address ? `Adresse ${shortAddress(address)} Â· chain ${chainId}` : "Connexion annulee", source: "window.ethereum", severity: address ? "ok" : "warning" }));
       setToast(address ? "Wallet connecte." : "Connexion annulee.");
     } catch (error) {
       setWalletStatus("Erreur de connexion");
@@ -245,7 +246,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
         const res = await fetch(api("/api/defender/ping"));
         const data = await res.json();
         defenderStatus = data?.status || "unknown";
-        nextLogs.push(buildLog({ type: "NETWORK", title: "Defender ping", payload: `${data?.status || "unknown"} · ${data?.network || "unknown"}`, source: "Mamora Defender", details: data || {}, severity: data?.status === "ok" ? "ok" : "warning" }));
+        nextLogs.push(buildLog({ type: "NETWORK", title: "Defender ping", payload: `${data?.status || "unknown"} Â· ${data?.network || "unknown"}`, source: "Mamora Defender", details: data || {}, severity: data?.status === "ok" ? "ok" : "warning" }));
       } catch (error) {
         nextLogs.push(buildLog({ type: "ALERT", title: "Defender indisponible", payload: error?.message || "Impossible de joindre Defender", source: "backend", severity: "warning" }));
       }
@@ -257,7 +258,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
         try {
           const balanceRes = await fetch(api(`/api/web3/balance/${liveAddress}`));
           const balanceData = await balanceRes.json();
-          nextLogs.push(buildLog({ type: "BLOCKCHAIN", title: "Solde Web3", payload: `${shortAddress(liveAddress)} · ${balanceData?.balanceInWei || "0"} wei`, source: balanceData?.source || "backend", details: balanceData || {} }));
+          nextLogs.push(buildLog({ type: "BLOCKCHAIN", title: "Solde Web3", payload: `${shortAddress(liveAddress)} Â· ${balanceData?.balanceInWei || "0"} wei`, source: balanceData?.source || "backend", details: balanceData || {} }));
         } catch (error) {
           nextLogs.push(buildLog({ type: "ALERT", title: "Balance Web3 indisponible", payload: error?.message || "Lecture balance impossible", source: "backend", severity: "warning" }));
         }
@@ -347,7 +348,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
           </div>
           <div className="tcv-profile-meta">
             <div><span>Wallet</span><strong>{walletAddress ? shortAddress(walletAddress) : "Aucun"}</strong></div>
-            <div><span>Chain</span><strong>{walletChain || "—"}</strong></div>
+            <div><span>Chain</span><strong>{walletChain || "â€”"}</strong></div>
             <div><span>Defender</span><strong>{metrics.defenderStatus}</strong></div>
             <div><span>SDR bridge</span><strong>{metrics.sdrBridge}</strong></div>
           </div>
@@ -390,3 +391,5 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
     </section>
   );
 }
+
+
