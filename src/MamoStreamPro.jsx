@@ -138,12 +138,55 @@ const MAMO_MESH_LOG_KEYS = [
   "quality",
 ];
 
+const DEFAULT_METRICS = {
+  sdrBandwidthKHz: 0,
+  scanLatencyMs: 0,
+  sdrActivePeaks: 0,
+  sdrSnrDb: 0,
+  sdrNoiseMeanDb: 0,
+  sdrOffsetMHz: 0,
+  sdrLockAcquired: false,
+  sdrMeshReady: false,
+  sdrTimestampUtc: "",
+  blockEvents: 0,
+  purchaseOrders: 0,
+  alerts: 0,
+  threatScore: 0,
+  devicesDetected: 0,
+  defenderStatus: "unknown",
+  sdrBridge: "unavailable",
+  sdrPeakDb: 0,
+  sdrPeakHz: 0,
+  sdrServiceRunning: false,
+  sdrServiceLastUpdatedUtc: "",
+  sdrServiceIntervalSeconds: 0,
+  sdrServiceError: "",
+  sdrServiceSuccessCount: 0,
+  sdrServiceAutostart: false,
+  sdrLogPath: "",
+  sdrLogEntryCount: 0,
+};
+
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const randomId = () => Math.random().toString(36).slice(2, 10).toUpperCase();
 const nowStamp = () => new Date().toLocaleTimeString("fr-CA", { hour12: false });
 const shortAddress = (address) => (!address ? "-" : `${address.slice(0, 6)}...${address.slice(-4)}`);
 const formatFrequencyMHz = (value) => (typeof value === "number" ? (value / 1_000_000).toFixed(4) : "-");
 const formatSigned = (value, digits = 2) => (typeof value === "number" ? `${value >= 0 ? "+" : ""}${value.toFixed(digits)}` : "-");
+const normalizeErrorMessage = (error, fallback) => {
+  if (error?.name === "AbortError") return "request_timeout";
+  return error?.message || fallback;
+};
+
+async function fetchWithTimeout(resource, options = {}, timeoutMs = 6000) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(resource, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 function loadSavedState() {
   try {
@@ -255,37 +298,14 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
   const [logs, setLogs] = useState(saved?.logs || []);
   const [selectedLogId, setSelectedLogId] = useState(saved?.selectedLogId || "");
   const [sdrSnapshot, setSdrSnapshot] = useState(saved?.sdrSnapshot || null);
-  const [meshLogTail, setMeshLogTail] = useState([]);
+  const [meshLogTail, setMeshLogTail] = useState(saved?.meshLogTail || []);
   const [toast, setToast] = useState("");
-  const [metrics, setMetrics] = useState({
-    sdrBandwidthKHz: 0,
-    scanLatencyMs: 0,
-    sdrActivePeaks: 0,
-    sdrSnrDb: 0,
-    sdrNoiseMeanDb: 0,
-    sdrOffsetMHz: 0,
-    sdrLockAcquired: false,
-    sdrMeshReady: false,
-    sdrTimestampUtc: "",
-    blockEvents: 0,
-    purchaseOrders: 0,
-    alerts: 0,
-    threatScore: 0,
-    devicesDetected: 0,
-    defenderStatus: "unknown",
-    sdrBridge: "unavailable",
-    sdrPeakDb: 0,
-    sdrPeakHz: 0,
-    sdrServiceRunning: false,
-    sdrServiceLastUpdatedUtc: "",
-    sdrServiceIntervalSeconds: 0,
-    sdrServiceError: "",
-    sdrServiceSuccessCount: 0,
-    sdrServiceAutostart: false,
-    sdrLogPath: "",
-    sdrLogEntryCount: 0,
-  });
+  const [metrics, setMetrics] = useState(saved?.metrics || DEFAULT_METRICS);
   const feedRef = useRef(null);
+  const mountedRef = useRef(true);
+  const refreshInFlightRef = useRef(false);
+  const metricsRef = useRef(saved?.metrics || DEFAULT_METRICS);
+  const selectedLogIdRef = useRef(saved?.selectedLogId || "");
   const copyText = async (label, value) => {
     try {
       await navigator.clipboard?.writeText(value);
@@ -301,8 +321,32 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
   };
 
   useEffect(() => {
-    saveState({ panel, selectedType, sessionName, walletAddress, walletChain, walletStatus, selectedLogId, sdrSnapshot, logs: logs.slice(0, 200) });
-  }, [panel, selectedType, sessionName, walletAddress, walletChain, walletStatus, selectedLogId, sdrSnapshot, logs]);
+    saveState({
+      panel,
+      selectedType,
+      sessionName,
+      walletAddress,
+      walletChain,
+      walletStatus,
+      selectedLogId,
+      sdrSnapshot,
+      meshLogTail: meshLogTail.slice(0, 12),
+      metrics,
+      logs: logs.slice(0, 200),
+    });
+  }, [panel, selectedType, sessionName, walletAddress, walletChain, walletStatus, selectedLogId, sdrSnapshot, meshLogTail, metrics, logs]);
+
+  useEffect(() => {
+    metricsRef.current = metrics;
+  }, [metrics]);
+
+  useEffect(() => {
+    selectedLogIdRef.current = selectedLogId;
+  }, [selectedLogId]);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
 
   useEffect(() => {
     try {
@@ -394,148 +438,198 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
   };
 
   const refreshLiveData = async (forceMesh = false) => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     const nextLogs = [];
     try {
+      const previousMetrics = metricsRef.current || DEFAULT_METRICS;
       const authHeaders = authToken ? { Authorization: `Bearer ${authToken}` } : {};
       let devicesDetected = 0;
       if (navigator.mediaDevices?.enumerateDevices) {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        devicesDetected = devices.length;
-        nextLogs.push(buildLog({ type: "DEVICE", title: "Inventaire appareils", payload: `${devices.length} peripheriques detectes par le navigateur`, source: "navigator.mediaDevices", details: { count: devices.length } }));
-      }
-
-      let defenderStatus = "offline";
-      let sdrBridge = "unavailable";
-      let sdrPeakDb = 0;
-      let sdrPeakHz = 0;
-      let sdrBandwidthKHz = 0;
-      let scanLatencyMs = 0;
-      let sdrActivePeaks = 0;
-      let sdrSnrDb = 0;
-      let sdrNoiseMeanDb = 0;
-      let sdrOffsetMHz = 0;
-      let sdrLockAcquired = false;
-      let sdrMeshReady = false;
-      let sdrTimestampUtc = "";
-      let sdrServiceRunning = false;
-      let sdrServiceLastUpdatedUtc = "";
-      let sdrServiceIntervalSeconds = 0;
-      let sdrServiceError = "";
-      let sdrServiceSuccessCount = 0;
-      let sdrServiceAutostart = false;
-      let sdrLogPath = "";
-      let sdrLogEntryCount = 0;
-      try {
-        const res = await fetch(api("/api/defender/ping"));
-        const data = await res.json();
-        defenderStatus = data?.status || "unknown";
-        nextLogs.push(buildLog({ type: "NETWORK", title: "Defender ping", payload: `${data?.status || "unknown"} · ${data?.network || "unknown"}`, source: "Mamora Defender", details: data || {}, severity: data?.status === "ok" ? "ok" : "warning" }));
-      } catch (error) {
-        nextLogs.push(buildLog({ type: "ALERT", title: "Defender indisponible", payload: error?.message || "Impossible de joindre Defender", source: "backend", severity: "warning" }));
-      }
-
-      try {
-        const serviceRes = await fetch(api("/api/sdr/mesh/service?auto_start=true"), { headers: authHeaders });
-        const serviceData = await serviceRes.json();
-        if (!serviceRes.ok) {
-          throw new Error(serviceData?.detail || "sdr_service_status_failed");
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          devicesDetected = devices.length;
+          nextLogs.push(buildLog({ type: "DEVICE", title: "Inventaire appareils", payload: `${devices.length} peripheriques detectes par le navigateur`, source: "navigator.mediaDevices", details: { count: devices.length } }));
+        } catch (error) {
+          nextLogs.push(buildLog({ type: "ALERT", title: "Inventaire appareils indisponible", payload: normalizeErrorMessage(error, "Impossible de lire les peripheriques navigateur"), source: "navigator.mediaDevices", severity: "warning" }));
         }
-        sdrServiceRunning = Boolean(serviceData?.running);
-        sdrServiceLastUpdatedUtc = serviceData?.lastUpdatedUtc || "";
-        sdrServiceIntervalSeconds = Number(serviceData?.intervalSeconds || 0);
-        sdrServiceError = serviceData?.lastError?.message || "";
-        sdrServiceSuccessCount = Number(serviceData?.successCount || 0);
-        sdrServiceAutostart = Boolean(serviceData?.autostart);
-        sdrLogPath = serviceData?.logPath || "";
-        nextLogs.push(buildLog({
-          type: "NETWORK",
-          title: "Service mesh",
-          payload: `${sdrServiceRunning ? "actif" : "inactif"} · interval ${sdrServiceIntervalSeconds || "-"} s · refresh ${forceMesh ? "force" : "partage"}`,
-          source: "backend-sdr-service",
-          details: serviceData || {},
-          severity: sdrServiceRunning ? "ok" : "warning",
-        }));
-      } catch (error) {
+      }
+
+      let defenderStatus = previousMetrics.defenderStatus || "unknown";
+      let sdrBridge = previousMetrics.sdrBridge || "unavailable";
+      let sdrPeakDb = Number(previousMetrics.sdrPeakDb || 0);
+      let sdrPeakHz = Number(previousMetrics.sdrPeakHz || 0);
+      let sdrBandwidthKHz = Number(previousMetrics.sdrBandwidthKHz || 0);
+      let scanLatencyMs = Number(previousMetrics.scanLatencyMs || 0);
+      let sdrActivePeaks = Number(previousMetrics.sdrActivePeaks || 0);
+      let sdrSnrDb = Number(previousMetrics.sdrSnrDb || 0);
+      let sdrNoiseMeanDb = Number(previousMetrics.sdrNoiseMeanDb || 0);
+      let sdrOffsetMHz = Number(previousMetrics.sdrOffsetMHz || 0);
+      let sdrLockAcquired = Boolean(previousMetrics.sdrLockAcquired);
+      let sdrMeshReady = Boolean(previousMetrics.sdrMeshReady);
+      let sdrTimestampUtc = previousMetrics.sdrTimestampUtc || "";
+      let sdrServiceRunning = Boolean(previousMetrics.sdrServiceRunning);
+      let sdrServiceLastUpdatedUtc = previousMetrics.sdrServiceLastUpdatedUtc || "";
+      let sdrServiceIntervalSeconds = Number(previousMetrics.sdrServiceIntervalSeconds || 0);
+      let sdrServiceError = previousMetrics.sdrServiceError || "";
+      let sdrServiceSuccessCount = Number(previousMetrics.sdrServiceSuccessCount || 0);
+      let sdrServiceAutostart = Boolean(previousMetrics.sdrServiceAutostart);
+      let sdrLogPath = previousMetrics.sdrLogPath || "";
+      let sdrLogEntryCount = Number(previousMetrics.sdrLogEntryCount || 0);
+
+      const [defenderResult, serviceResult, meshResult, logsResult] = await Promise.allSettled([
+        fetchWithTimeout(api("/api/defender/ping")),
+        fetchWithTimeout(api("/api/sdr/mesh/service?auto_start=true"), { headers: authHeaders }),
+        fetchWithTimeout(api(forceMesh ? "/api/sdr/mesh?force=true" : "/api/sdr/mesh"), { headers: authHeaders }),
+        fetchWithTimeout(api("/api/sdr/mesh/logs?limit=8"), { headers: authHeaders }),
+      ]);
+
+      if (defenderResult.status === "fulfilled") {
+        try {
+          const data = await defenderResult.value.json();
+          defenderStatus = data?.status || "unknown";
+          nextLogs.push(buildLog({ type: "NETWORK", title: "Defender ping", payload: `${data?.status || "unknown"} · ${data?.network || "unknown"}`, source: "Mamora Defender", details: data || {}, severity: data?.status === "ok" ? "ok" : "warning" }));
+        } catch (error) {
+          nextLogs.push(buildLog({ type: "ALERT", title: "Defender indisponible", payload: normalizeErrorMessage(error, "Impossible de lire Defender"), source: "backend", severity: "warning" }));
+        }
+      } else {
+        nextLogs.push(buildLog({ type: "ALERT", title: "Defender indisponible", payload: normalizeErrorMessage(defenderResult.reason, "Impossible de joindre Defender"), source: "backend", severity: "warning" }));
+      }
+
+      if (serviceResult.status === "fulfilled") {
+        let serviceData = {};
+        try {
+          serviceData = await serviceResult.value.json();
+        } catch {
+          serviceData = {};
+        }
+        if (serviceResult.value.ok) {
+          sdrServiceRunning = Boolean(serviceData?.running);
+          sdrServiceLastUpdatedUtc = serviceData?.lastUpdatedUtc || sdrServiceLastUpdatedUtc;
+          sdrServiceIntervalSeconds = Number(serviceData?.intervalSeconds || sdrServiceIntervalSeconds || 0);
+          sdrServiceError = serviceData?.lastError?.message || "";
+          sdrServiceSuccessCount = Number(serviceData?.successCount || sdrServiceSuccessCount || 0);
+          sdrServiceAutostart = Boolean(serviceData?.autostart);
+          sdrLogPath = serviceData?.logPath || sdrLogPath;
+          nextLogs.push(buildLog({
+            type: "NETWORK",
+            title: "Service mesh",
+            payload: `${sdrServiceRunning ? "actif" : "inactif"} · interval ${sdrServiceIntervalSeconds || "-"} s · refresh ${forceMesh ? "force" : "partage"}`,
+            source: "backend-sdr-service",
+            details: serviceData || {},
+            severity: sdrServiceRunning ? "ok" : "warning",
+          }));
+        } else {
+          nextLogs.push(buildLog({
+            type: "ALERT",
+            title: "Service mesh indisponible",
+            payload: serviceData?.detail || `sdr_service_status_${serviceResult.value.status}`,
+            source: "backend-sdr-service",
+            severity: "warning",
+          }));
+        }
+      } else {
         nextLogs.push(buildLog({
           type: "ALERT",
           title: "Service mesh indisponible",
-          payload: error?.message || "Impossible de lire le statut du service mesh",
+          payload: normalizeErrorMessage(serviceResult.reason, "Impossible de lire le statut du service mesh"),
           source: "backend-sdr-service",
           severity: "warning",
         }));
       }
 
-      try {
-        const meshRes = await fetch(api(forceMesh ? "/api/sdr/mesh?force=true" : "/api/sdr/mesh"), { headers: authHeaders });
-        const meshData = await meshRes.json();
-        if (!meshRes.ok) {
-          throw new Error(meshData?.detail || "sdr_mesh_failed");
+      if (meshResult.status === "fulfilled") {
+        let meshData = {};
+        try {
+          meshData = await meshResult.value.json();
+        } catch {
+          meshData = {};
         }
-        setSdrSnapshot(meshData);
-        sdrBridge = "connected";
-        sdrServiceRunning = Boolean(meshData?.service?.running ?? sdrServiceRunning);
-        sdrServiceLastUpdatedUtc = meshData?.service?.lastUpdatedUtc || sdrServiceLastUpdatedUtc;
-        sdrServiceIntervalSeconds = Number(meshData?.service?.intervalSeconds || sdrServiceIntervalSeconds || 0);
-        sdrServiceError = meshData?.service?.lastError?.message || sdrServiceError;
-        sdrServiceSuccessCount = Number(meshData?.service?.successCount || sdrServiceSuccessCount || 0);
-        sdrServiceAutostart = Boolean(meshData?.service?.autostart ?? sdrServiceAutostart);
-        sdrLogPath = meshData?.service?.logPath || sdrLogPath;
-        sdrPeakDb = Number(meshData?.peakPowerDb || 0);
-        sdrPeakHz = Number(meshData?.peakFrequencyMHz || 0) * 1_000_000;
-        sdrBandwidthKHz = Number(meshData?.spanKHz || 0);
-        scanLatencyMs = Number(meshData?.scanDurationMs || 0);
-        sdrActivePeaks = Number(meshData?.activePeakCount || 0);
-        sdrSnrDb = Number(meshData?.snrDb || 0);
-        sdrNoiseMeanDb = Number(meshData?.noiseMeanDb || 0);
-        sdrOffsetMHz = Number(meshData?.offsetMHz || 0);
-        sdrLockAcquired = Boolean(meshData?.lockAcquired);
-        sdrMeshReady = Boolean(meshData?.meshReady);
-        sdrTimestampUtc = meshData?.timestampUtc || "";
-        nextLogs.push(buildLog({
-          type: "SDR",
-          title: "Snapshot mesh MAMO",
-          payload: `Lock ${sdrLockAcquired ? "oui" : "non"} · SNR ${sdrSnrDb.toFixed(2)} dB · offset ${formatSigned(sdrOffsetMHz, 4)} MHz · ${forceMesh ? "scan force" : "snapshot service"}`,
-          source: "mesh-sdr",
-          details: {
-            timestampUtc: sdrTimestampUtc,
-            peakFrequencyMHz: meshData?.peakFrequencyMHz,
-            peakPowerDb: meshData?.peakPowerDb,
-            noiseMeanDb: meshData?.noiseMeanDb,
-            snrDb: meshData?.snrDb,
-            offsetMHz: meshData?.offsetMHz,
-            lockAcquired: meshData?.lockAcquired,
-            meshReady: meshData?.meshReady,
-            quality: meshData?.quality,
-          },
-          severity: sdrMeshReady ? "ok" : sdrLockAcquired ? "warning" : "critical",
-        }));
-      } catch (error) {
-        setSdrSnapshot(null);
-        sdrBridge = error?.message === "missing_authorization" || error?.message === "insufficient_permissions" ? "protected" : "unavailable";
+        if (meshResult.value.ok) {
+          if (mountedRef.current) setSdrSnapshot(meshData);
+          sdrBridge = "connected";
+          sdrServiceRunning = Boolean(meshData?.service?.running ?? sdrServiceRunning);
+          sdrServiceLastUpdatedUtc = meshData?.service?.lastUpdatedUtc || sdrServiceLastUpdatedUtc;
+          sdrServiceIntervalSeconds = Number(meshData?.service?.intervalSeconds || sdrServiceIntervalSeconds || 0);
+          sdrServiceError = meshData?.service?.lastError?.message || sdrServiceError;
+          sdrServiceSuccessCount = Number(meshData?.service?.successCount || sdrServiceSuccessCount || 0);
+          sdrServiceAutostart = Boolean(meshData?.service?.autostart ?? sdrServiceAutostart);
+          sdrLogPath = meshData?.service?.logPath || sdrLogPath;
+          sdrPeakDb = Number(meshData?.peakPowerDb || 0);
+          sdrPeakHz = Number(meshData?.peakFrequencyMHz || 0) * 1_000_000;
+          sdrBandwidthKHz = Number(meshData?.spanKHz || 0);
+          scanLatencyMs = Number(meshData?.scanDurationMs || 0);
+          sdrActivePeaks = Number(meshData?.activePeakCount || 0);
+          sdrSnrDb = Number(meshData?.snrDb || 0);
+          sdrNoiseMeanDb = Number(meshData?.noiseMeanDb || 0);
+          sdrOffsetMHz = Number(meshData?.offsetMHz || 0);
+          sdrLockAcquired = Boolean(meshData?.lockAcquired);
+          sdrMeshReady = Boolean(meshData?.meshReady);
+          sdrTimestampUtc = meshData?.timestampUtc || "";
+          nextLogs.push(buildLog({
+            type: "SDR",
+            title: "Snapshot mesh MAMO",
+            payload: `Lock ${sdrLockAcquired ? "oui" : "non"} · SNR ${sdrSnrDb.toFixed(2)} dB · offset ${formatSigned(sdrOffsetMHz, 4)} MHz · ${forceMesh ? "scan force" : "snapshot service"}`,
+            source: "mesh-sdr",
+            details: {
+              timestampUtc: sdrTimestampUtc,
+              peakFrequencyMHz: meshData?.peakFrequencyMHz,
+              peakPowerDb: meshData?.peakPowerDb,
+              noiseMeanDb: meshData?.noiseMeanDb,
+              snrDb: meshData?.snrDb,
+              offsetMHz: meshData?.offsetMHz,
+              lockAcquired: meshData?.lockAcquired,
+              meshReady: meshData?.meshReady,
+              quality: meshData?.quality,
+            },
+            severity: sdrMeshReady ? "ok" : sdrLockAcquired ? "warning" : "critical",
+          }));
+        } else {
+          sdrBridge = meshData?.detail === "missing_authorization" || meshData?.detail === "insufficient_permissions" ? "protected" : previousMetrics.sdrBridge || "unavailable";
+          nextLogs.push(buildLog({
+            type: "ALERT",
+            title: "SDR indisponible",
+            payload: meshData?.detail || `sdr_mesh_${meshResult.value.status}`,
+            source: "backend-sdr",
+            severity: "warning",
+          }));
+        }
+      } else {
+        sdrBridge = previousMetrics.sdrBridge || "unavailable";
         nextLogs.push(buildLog({
           type: "ALERT",
           title: "SDR indisponible",
-          payload: error?.message || "Impossible de lire le signal SDR",
+          payload: normalizeErrorMessage(meshResult.reason, "Impossible de lire le signal SDR"),
           source: "backend-sdr",
           severity: "warning",
         }));
       }
 
-      try {
-        const logsRes = await fetch(api("/api/sdr/mesh/logs?limit=8"), { headers: authHeaders });
-        const logsData = await logsRes.json();
-        if (!logsRes.ok) {
-          throw new Error(logsData?.detail || "sdr_mesh_logs_failed");
+      if (logsResult.status === "fulfilled") {
+        let logsData = {};
+        try {
+          logsData = await logsResult.value.json();
+        } catch {
+          logsData = {};
         }
-        setMeshLogTail(Array.isArray(logsData?.entries) ? logsData.entries : []);
-        sdrLogPath = logsData?.path || sdrLogPath;
-        sdrLogEntryCount = Number(logsData?.count || 0);
-      } catch (error) {
-        setMeshLogTail([]);
+        if (logsResult.value.ok) {
+          if (mountedRef.current) setMeshLogTail(Array.isArray(logsData?.entries) ? logsData.entries : []);
+          sdrLogPath = logsData?.path || sdrLogPath;
+          sdrLogEntryCount = Number(logsData?.count || 0);
+        } else {
+          nextLogs.push(buildLog({
+            type: "ALERT",
+            title: "Journal mesh indisponible",
+            payload: logsData?.detail || `sdr_mesh_logs_${logsResult.value.status}`,
+            source: "backend-sdr-log",
+            severity: "warning",
+          }));
+        }
+      } else {
         nextLogs.push(buildLog({
           type: "ALERT",
           title: "Journal mesh indisponible",
-          payload: error?.message || "Impossible de lire le journal JSONL mesh",
+          payload: normalizeErrorMessage(logsResult.reason, "Impossible de lire le journal JSONL mesh"),
           source: "backend-sdr-log",
           severity: "warning",
         }));
@@ -557,35 +651,36 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
       let purchaseOrders = 0;
       if (liveAddress) {
         try {
-          const balanceRes = await fetch(api(`/api/web3/balance/${liveAddress}`));
+          const balanceRes = await fetchWithTimeout(api(`/api/web3/balance/${liveAddress}`));
           const balanceData = await balanceRes.json();
           nextLogs.push(buildLog({ type: "BLOCKCHAIN", title: "Solde Web3", payload: `${shortAddress(liveAddress)} · ${balanceData?.balanceInWei || "0"} wei`, source: balanceData?.source || "backend", details: balanceData || {} }));
         } catch (error) {
-          nextLogs.push(buildLog({ type: "ALERT", title: "Balance Web3 indisponible", payload: error?.message || "Lecture balance impossible", source: "backend", severity: "warning" }));
+          nextLogs.push(buildLog({ type: "ALERT", title: "Balance Web3 indisponible", payload: normalizeErrorMessage(error, "Lecture balance impossible"), source: "backend", severity: "warning" }));
         }
 
         try {
-          const eventsRes = await fetch(api(`/api/web3/events/mining?address=${encodeURIComponent(liveAddress)}&limit=20`));
+          const eventsRes = await fetchWithTimeout(api(`/api/web3/events/mining?address=${encodeURIComponent(liveAddress)}&limit=20`));
           const eventsData = await eventsRes.json();
           blockEvents = Array.isArray(eventsData?.events) ? eventsData.events.length : 0;
           nextLogs.push(buildLog({ type: "BLOCKCHAIN", title: "Evenements mining", payload: `${blockEvents} evenements pour ${shortAddress(liveAddress)}`, source: eventsData?.source || "backend", details: { count: blockEvents } }));
         } catch (error) {
-          nextLogs.push(buildLog({ type: "ALERT", title: "Mining events indisponibles", payload: error?.message || "Lecture events impossible", source: "backend", severity: "warning" }));
+          nextLogs.push(buildLog({ type: "ALERT", title: "Mining events indisponibles", payload: normalizeErrorMessage(error, "Lecture events impossible"), source: "backend", severity: "warning" }));
         }
 
         if (authToken) {
           try {
-            const ordersRes = await fetch(api(`/api/purchase/orders?walletAddress=${encodeURIComponent(liveAddress)}`), { headers: { Authorization: `Bearer ${authToken}` } });
+            const ordersRes = await fetchWithTimeout(api(`/api/purchase/orders?walletAddress=${encodeURIComponent(liveAddress)}`), { headers: { Authorization: `Bearer ${authToken}` } });
             const ordersData = await ordersRes.json();
             purchaseOrders = Array.isArray(ordersData?.orders) ? ordersData.orders.length : 0;
             nextLogs.push(buildLog({ type: "NETWORK", title: "Ordres banking", payload: `${purchaseOrders} ordres pour ${shortAddress(liveAddress)}`, source: "banking", details: { count: purchaseOrders } }));
           } catch (error) {
-            nextLogs.push(buildLog({ type: "ALERT", title: "Ordres banking indisponibles", payload: error?.message || "Lecture orders impossible", source: "banking", severity: "warning" }));
+            nextLogs.push(buildLog({ type: "ALERT", title: "Ordres banking indisponibles", payload: normalizeErrorMessage(error, "Lecture orders impossible"), source: "banking", severity: "warning" }));
           }
         }
       }
 
-      setMetrics({
+      if (mountedRef.current) {
+        setMetrics({
         sdrBandwidthKHz,
         scanLatencyMs,
         sdrActivePeaks,
@@ -612,14 +707,21 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
         sdrServiceAutostart,
         sdrLogPath,
         sdrLogEntryCount,
-      });
+        });
+      }
 
       if (nextLogs.length) {
-        setLogs((current) => [...nextLogs.reverse(), ...current].slice(0, 200));
-        if (!selectedLogId && nextLogs[0]) setSelectedLogId(nextLogs[0].id);
+        if (mountedRef.current) {
+          setLogs((current) => [...nextLogs.reverse(), ...current].slice(0, 200));
+          if (!selectedLogIdRef.current && nextLogs[0]) setSelectedLogId(nextLogs[0].id);
+        }
       }
     } catch (error) {
-      appendLog(buildLog({ type: "ALERT", title: "Refresh impossible", payload: error?.message || "Erreur de rafraichissement", source: "engine", severity: "critical" }));
+      if (mountedRef.current) {
+        appendLog(buildLog({ type: "ALERT", title: "Refresh impossible", payload: normalizeErrorMessage(error, "Erreur de rafraichissement"), source: "engine", severity: "critical" }));
+      }
+    } finally {
+      refreshInFlightRef.current = false;
     }
   };
 
