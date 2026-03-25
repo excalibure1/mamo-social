@@ -143,12 +143,12 @@ const BASE_CATALOG = [
   },
 ];
 
-const SYNC_LINES = [
+const FALLBACK_SYNC_LINES = [
   "> INITIALISATION MAMO TITAN V7.2...",
-  "> CHARGEMENT DES COUCHES CANADA & INTERNATIONAL...",
-  "> INDEXATION DES 12 NODES CINEMA P2P...",
-  "> ACTIVATION DU MOTEUR DE PREVIEW...",
-  "> TUNNEL SAINT-GABRIEL : OPTIMISE.",
+  "> DETECTION LIVE DES NODES MAMO...",
+  "> INDEXATION DU REGISTRE DISTRIBUE...",
+  "> ACTIVATION DU WORKER CDN...",
+  "> RACCORDEMENT AU CANAL MESH...",
   "> HUB OPERATIONNEL.",
 ];
 
@@ -245,7 +245,62 @@ function buildNodeArt(color) {
 }
 
 function resolvePlayableUrl(item) {
-  return item?.url || item?.fallbackUrl || DEFAULT_STREAM_URL;
+  return item?.playbackUrl || item?.url || item?.fallbackUrl || DEFAULT_STREAM_URL;
+}
+
+function resolvePreviewUrl(item) {
+  return item?.previewUrl || item?.playbackUrl || item?.url || item?.fallbackUrl || DEFAULT_STREAM_URL;
+}
+
+function buildLiveSyncState({ snapshot, summary, nodes, queue, service, mesh, distribution, loading, error }) {
+  const detectedNodes = Number(summary?.nodeCount || nodes.length || 0);
+  const onlineNodes = Number(summary?.onlineNodes || nodes.filter((node) => node.status === "online").length || 0);
+  const queuedJobs = Number(summary?.queuedSyncJobs || queue.length || 0);
+  const contentCount = Number(summary?.contentCount || 0);
+  const freshAssets = Number(summary?.freshAssets || 0);
+  const meshLabel = mesh?.targetFrequencyMHz ? `${mesh.targetFrequencyMHz} MHz | ${mesh.quality || "watch"}` : "canal en attente";
+  const serviceLabel = service?.running ? `ACTIF | ${service.intervalSeconds || 0}s` : "EN ATTENTE";
+  const distributionLabel = distribution?.health || "watch";
+
+  if (!snapshot) {
+    return {
+      status: loading ? "Detection live des nodes MAMO..." : "Initialisation du registre distribue...",
+      progress: loading ? 24 : 10,
+      lines: [
+        `> DETECTION LIVE DES NODES MAMO... ${detectedNodes} detectes`,
+        `> REGISTRE DISTRIBUE... ${loading ? "connexion en cours" : "pret a scanner"}`,
+        `> WORKER CDN... ${serviceLabel}`,
+        `> CANAL MESH... ${meshLabel}`,
+        error ? `> ERREUR REGISTRE... ${error}` : FALLBACK_SYNC_LINES[FALLBACK_SYNC_LINES.length - 1],
+      ],
+    };
+  }
+
+  const progress = Math.min(
+    100,
+    Math.max(
+      72,
+      28
+        + Math.min(28, detectedNodes * 4)
+        + Math.min(18, onlineNodes * 3)
+        + (service?.running ? 12 : 0)
+        + (mesh ? 10 : 0)
+        + Math.min(12, Math.floor(contentCount / 2))
+    )
+  );
+
+  return {
+    status: error ? "Registre MAMO degrade mais disponible" : `Nodes detectes: ${detectedNodes} | ${onlineNodes} en ligne`,
+    progress,
+    lines: [
+      `> DETECTION LIVE DES NODES MAMO... ${detectedNodes} detectes / ${onlineNodes} en ligne`,
+      `> CATALOGUE DISTRIBUE... ${contentCount} contenus indexes | ${freshAssets} assets frais`,
+      `> WORKER CDN... ${serviceLabel}`,
+      `> FILE DE SYNC... ${queuedJobs} jobs`,
+      `> CANAL MESH... ${meshLabel}`,
+      error ? `> REGISTRE... ${error}` : `> HUB... ${distributionLabel} | ${snapshot.timestampUtc || "sync live"}`,
+    ],
+  };
 }
 
 function PlayerNodeCard({ item }) {
@@ -271,8 +326,6 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   const previewPlayPromiseRef = useRef(null);
 
   const [mode, setMode] = useState("hero");
-  const [syncLines, setSyncLines] = useState([]);
-  const [syncProgress, setSyncProgress] = useState(0);
   const [currentTab, setCurrentTab] = useState("P2P");
   const [playerItem, setPlayerItem] = useState(null);
   const [playerLoading, setPlayerLoading] = useState(false);
@@ -291,9 +344,11 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     const source = registrySnapshot?.catalog?.length ? registrySnapshot.catalog : createFallbackCatalog();
     return source.map((item) => ({
       ...item,
+      playbackUrl: item.playbackPath ? api(item.playbackPath) : resolvePlayableUrl(item),
+      previewUrl: item.previewPath ? api(item.previewPath) : resolvePreviewUrl(item),
       nodeImage: buildNodeArt(item.color || "#06b6d4"),
     }));
-  }, [registrySnapshot]);
+  }, [api, registrySnapshot]);
 
   const filteredItems = useMemo(
     () => mediaData.filter((item) => item.category === currentTab),
@@ -314,6 +369,21 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   const meshInfo = registrySnapshot?.signalHub?.mesh?.snapshot || null;
   const distribution = registrySnapshot?.distribution || {};
   const latestReplicationJob = replicationService.latestJob || null;
+  const syncState = useMemo(
+    () =>
+      buildLiveSyncState({
+        snapshot: registrySnapshot,
+        summary: registrySummary,
+        nodes: cdnNodes,
+        queue: syncQueue,
+        service: replicationService,
+        mesh: meshInfo,
+        distribution,
+        loading: registryLoading,
+        error: registryError,
+      }),
+    [registrySnapshot, registrySummary, cdnNodes, syncQueue, replicationService, meshInfo, distribution, registryLoading, registryError]
+  );
 
   useEffect(() => {
     return () => {
@@ -354,10 +424,12 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
         setRegistrySnapshot(payload);
         setRegistryError("");
       }
+      return payload;
     } catch (error) {
       if (mountedRef.current) {
         setRegistryError(String(error?.message || "cdn_registry_unavailable"));
       }
+      return null;
     } finally {
       if (!silent && mountedRef.current) setRegistryLoading(false);
     }
@@ -553,27 +625,29 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   const startConnection = async () => {
     syncCancelledRef.current = false;
     setMode("sync");
-    setSyncLines([]);
-    setSyncProgress(0);
+    let payload = await refreshRegistry(false);
+    if (syncCancelledRef.current) return;
 
-    for (let i = 0; i < SYNC_LINES.length; i += 1) {
-      if (syncCancelledRef.current) return;
-      // Small staging delay for terminal-like feel.
-      // This makes the handoff to the shell feel more deliberate.
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((resolve) => window.setTimeout(resolve, 550));
-      setSyncLines((prev) => [...prev, SYNC_LINES[i]]);
-      setSyncProgress(Math.round(((i + 1) / SYNC_LINES.length) * 100));
+    const serviceRunning = Boolean(payload?.service?.running || replicationService.running);
+    if (!serviceRunning) {
+      await toggleCdnService(true);
+      payload = await refreshRegistry(true);
     }
 
-    if (syncCancelledRef.current) return;
-    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (syncCancelledRef.current) return;
+      // Short live polling window so the sync screen reflects real nodes before entering the app.
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => window.setTimeout(resolve, 450));
+      // eslint-disable-next-line no-await-in-loop
+      payload = await refreshRegistry(true);
+      if (payload?.summary?.nodeCount && payload?.catalog?.length) {
+        break;
+      }
+    }
+
     if (!syncCancelledRef.current) {
       setMode("app");
-      window.setTimeout(() => {
-        void toggleCdnService(true);
-        void refreshRegistry(true);
-      }, 0);
     }
   };
 
@@ -604,7 +678,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     await stopPreview(previewItemId);
     const video = previewVideoRefs.current.get(item.id);
     if (!video) return;
-    const nextUrl = resolvePlayableUrl(item);
+    const nextUrl = resolvePreviewUrl(item);
 
     setPreviewItemId(item.id);
     setPreviewRemaining(15);
@@ -743,11 +817,11 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
       {mode === "sync" && (
         <div className="cdn-sync-screen">
           <div className="cdn-sync-card">
-            <div className="cdn-sync-bar" style={{ width: `${syncProgress}%` }} />
+            <div className="cdn-sync-bar" style={{ width: `${syncState.progress}%` }} />
             <Loader2 size={44} color="#06b6d4" className="spin" />
-            <p className="cdn-sync-status">Chargement des 12 Nodes Cinema...</p>
+            <p className="cdn-sync-status">{syncState.status}</p>
             <div className="cdn-sync-logs">
-              {syncLines.map((line) => (
+              {syncState.lines.map((line) => (
                 <p key={line}>{line}</p>
               ))}
             </div>
