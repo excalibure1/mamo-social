@@ -165,6 +165,12 @@ const DEFAULT_METRICS = {
   sdrServiceAutostart: false,
   sdrLogPath: "",
   sdrLogEntryCount: 0,
+  activeNodes: 0,
+  distributionHealth: "unknown",
+  lastMeshEventUtc: "",
+  meshFeedCount: 0,
+  bankingAuthorized: false,
+  hubAvailable: false,
 };
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -177,6 +183,56 @@ const normalizeErrorMessage = (error, fallback) => {
   if (error?.name === "AbortError") return "request_timeout";
   return error?.message || fallback;
 };
+
+const withDefaultMetrics = (metrics = {}) => ({ ...DEFAULT_METRICS, ...(metrics || {}) });
+
+function applyMeshSnapshotToMetrics(meshData, previousMetrics = DEFAULT_METRICS) {
+  return {
+    sdrBridge: "connected",
+    sdrPeakDb: Number(meshData?.peakPowerDb || 0),
+    sdrPeakHz: Number(meshData?.peakFrequencyMHz || 0) * 1_000_000,
+    sdrBandwidthKHz: Number(meshData?.spanKHz || 0),
+    scanLatencyMs: Number(meshData?.scanDurationMs || 0),
+    sdrActivePeaks: Number(meshData?.activePeakCount || 0),
+    sdrSnrDb: Number(meshData?.snrDb || 0),
+    sdrNoiseMeanDb: Number(meshData?.noiseMeanDb || 0),
+    sdrOffsetMHz: Number(meshData?.offsetMHz || 0),
+    sdrLockAcquired: Boolean(meshData?.lockAcquired),
+    sdrMeshReady: Boolean(meshData?.meshReady),
+    sdrTimestampUtc: meshData?.timestampUtc || previousMetrics.sdrTimestampUtc || "",
+    sdrServiceRunning: Boolean(meshData?.service?.running ?? previousMetrics.sdrServiceRunning),
+    sdrServiceLastUpdatedUtc: meshData?.service?.lastUpdatedUtc || previousMetrics.sdrServiceLastUpdatedUtc || "",
+    sdrServiceIntervalSeconds: Number(meshData?.service?.intervalSeconds || previousMetrics.sdrServiceIntervalSeconds || 0),
+    sdrServiceError: meshData?.service?.lastError?.message || previousMetrics.sdrServiceError || "",
+    sdrServiceSuccessCount: Number(meshData?.service?.successCount || previousMetrics.sdrServiceSuccessCount || 0),
+    sdrServiceAutostart: Boolean(meshData?.service?.autostart ?? previousMetrics.sdrServiceAutostart),
+    sdrLogPath: meshData?.service?.logPath || previousMetrics.sdrLogPath || "",
+  };
+}
+
+function restoreMetrics(savedState) {
+  const restored = withDefaultMetrics(savedState?.metrics);
+
+  if (savedState?.sdrSnapshot) {
+    Object.assign(restored, applyMeshSnapshotToMetrics(savedState.sdrSnapshot, restored));
+  }
+
+  if (Array.isArray(savedState?.meshLogTail) && savedState.meshLogTail.length) {
+    restored.sdrLogEntryCount = Math.max(restored.sdrLogEntryCount, savedState.meshLogTail.length);
+    restored.sdrTimestampUtc = restored.sdrTimestampUtc || savedState.meshLogTail[0]?.timestampUtc || "";
+    restored.hubAvailable = true;
+  }
+
+  restored.activeNodes = Math.max(Number(restored.activeNodes || 0), Number(restored.sdrActivePeaks || 0));
+  return restored;
+}
+
+function buildSignalHubUrl(api, walletAddress = "") {
+  const base = api("/api/platform/signal-hub");
+  const params = new URLSearchParams({ logLimit: "8" });
+  if (walletAddress) params.set("walletAddress", walletAddress);
+  return `${base}?${params.toString()}`;
+}
 
 async function fetchWithTimeout(resource, options = {}, timeoutMs = 6000) {
   const controller = new AbortController();
@@ -288,6 +344,7 @@ function CodeCard({ title, code, onCopy }) {
 
 export default function MamoStreamPro({ api, authToken = "", userAddress = "", isLocalDevHost = false }) {
   const saved = loadSavedState();
+  const initialMetrics = restoreMetrics(saved);
   const [panel, setPanel] = useState(saved?.panel || "overview");
   const [search, setSearch] = useState("");
   const [selectedType, setSelectedType] = useState(saved?.selectedType || "ALL");
@@ -299,12 +356,13 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
   const [selectedLogId, setSelectedLogId] = useState(saved?.selectedLogId || "");
   const [sdrSnapshot, setSdrSnapshot] = useState(saved?.sdrSnapshot || null);
   const [meshLogTail, setMeshLogTail] = useState(saved?.meshLogTail || []);
+  const [hubSnapshot, setHubSnapshot] = useState(saved?.hubSnapshot || null);
   const [toast, setToast] = useState("");
-  const [metrics, setMetrics] = useState(saved?.metrics || DEFAULT_METRICS);
+  const [metrics, setMetrics] = useState(initialMetrics);
   const feedRef = useRef(null);
   const mountedRef = useRef(true);
   const refreshInFlightRef = useRef(false);
-  const metricsRef = useRef(saved?.metrics || DEFAULT_METRICS);
+  const metricsRef = useRef(initialMetrics);
   const selectedLogIdRef = useRef(saved?.selectedLogId || "");
   const copyText = async (label, value) => {
     try {
@@ -331,10 +389,11 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
       selectedLogId,
       sdrSnapshot,
       meshLogTail: meshLogTail.slice(0, 12),
+      hubSnapshot,
       metrics,
       logs: logs.slice(0, 200),
     });
-  }, [panel, selectedType, sessionName, walletAddress, walletChain, walletStatus, selectedLogId, sdrSnapshot, meshLogTail, metrics, logs]);
+  }, [panel, selectedType, sessionName, walletAddress, walletChain, walletStatus, selectedLogId, sdrSnapshot, meshLogTail, hubSnapshot, metrics, logs]);
 
   useEffect(() => {
     metricsRef.current = metrics;
@@ -442,9 +501,10 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
     refreshInFlightRef.current = true;
     const nextLogs = [];
     try {
-      const previousMetrics = metricsRef.current || DEFAULT_METRICS;
+      const previousMetrics = withDefaultMetrics(metricsRef.current);
       const authHeaders = authToken ? { Authorization: `Bearer ${authToken}` } : {};
-      let devicesDetected = 0;
+      const liveAddress = walletAddress || userAddress || "";
+      let devicesDetected = Number(previousMetrics.devicesDetected || 0);
       if (navigator.mediaDevices?.enumerateDevices) {
         try {
           const devices = await navigator.mediaDevices.enumerateDevices();
@@ -476,13 +536,109 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
       let sdrServiceAutostart = Boolean(previousMetrics.sdrServiceAutostart);
       let sdrLogPath = previousMetrics.sdrLogPath || "";
       let sdrLogEntryCount = Number(previousMetrics.sdrLogEntryCount || 0);
+      let activeNodes = Number(previousMetrics.activeNodes || 0);
+      let distributionHealth = previousMetrics.distributionHealth || "unknown";
+      let lastMeshEventUtc = previousMetrics.lastMeshEventUtc || "";
+      let meshFeedCount = Number(previousMetrics.meshFeedCount || 0);
+      let bankingAuthorized = Boolean(previousMetrics.bankingAuthorized);
+      let hubAvailable = Boolean(previousMetrics.hubAvailable);
+      let blockEvents = Number(previousMetrics.blockEvents || 0);
+      let purchaseOrders = Number(previousMetrics.purchaseOrders || 0);
+      let hubThreatScore = Number(previousMetrics.threatScore || 0);
 
-      const [defenderResult, serviceResult, meshResult, logsResult] = await Promise.allSettled([
+      const [hubResult, defenderResult, serviceResult, meshResult, logsResult] = await Promise.allSettled([
+        fetchWithTimeout(buildSignalHubUrl(api, liveAddress), { headers: authHeaders }),
         fetchWithTimeout(api("/api/defender/ping")),
         fetchWithTimeout(api("/api/sdr/mesh/service?auto_start=true"), { headers: authHeaders }),
         fetchWithTimeout(api(forceMesh ? "/api/sdr/mesh?force=true" : "/api/sdr/mesh"), { headers: authHeaders }),
         fetchWithTimeout(api("/api/sdr/mesh/logs?limit=8"), { headers: authHeaders }),
       ]);
+
+      if (hubResult.status === "fulfilled") {
+        let hubData = {};
+        try {
+          hubData = await hubResult.value.json();
+        } catch {
+          hubData = {};
+        }
+
+        if (hubResult.value.ok) {
+          hubAvailable = true;
+          if (mountedRef.current) setHubSnapshot(hubData);
+
+          const hubMesh = hubData?.mesh?.snapshot || null;
+          const hubLogTail = Array.isArray(hubData?.mesh?.logTail) ? hubData.mesh.logTail : [];
+          activeNodes = Number(hubData?.telecom?.activeNodes || activeNodes || 0);
+          distributionHealth = hubData?.distribution?.health || distributionHealth;
+          lastMeshEventUtc = hubData?.distribution?.lastMeshEventUtc || lastMeshEventUtc;
+          meshFeedCount = Array.isArray(hubData?.telecom?.meshFeed) ? hubData.telecom.meshFeed.length : meshFeedCount;
+          hubThreatScore = Number(hubData?.distribution?.threatScore ?? hubThreatScore ?? 0);
+          defenderStatus = hubData?.defender?.status || defenderStatus;
+          sdrLogPath = hubData?.mesh?.logPath || sdrLogPath;
+          sdrLogEntryCount = Number(hubData?.mesh?.logCount || sdrLogEntryCount || 0);
+          bankingAuthorized = Boolean(hubData?.banking?.authorized ?? bankingAuthorized);
+          blockEvents = Number(hubData?.web3?.eventCount || blockEvents || 0);
+          purchaseOrders = Number(hubData?.banking?.orderCount || purchaseOrders || 0);
+
+          if (hubLogTail.length && mountedRef.current) {
+            setMeshLogTail(hubLogTail);
+          }
+
+          if (hubMesh) {
+            const meshMetrics = applyMeshSnapshotToMetrics(hubMesh, previousMetrics);
+            sdrBridge = meshMetrics.sdrBridge;
+            sdrPeakDb = meshMetrics.sdrPeakDb;
+            sdrPeakHz = meshMetrics.sdrPeakHz;
+            sdrBandwidthKHz = meshMetrics.sdrBandwidthKHz;
+            scanLatencyMs = meshMetrics.scanLatencyMs;
+            sdrActivePeaks = meshMetrics.sdrActivePeaks;
+            sdrSnrDb = meshMetrics.sdrSnrDb;
+            sdrNoiseMeanDb = meshMetrics.sdrNoiseMeanDb;
+            sdrOffsetMHz = meshMetrics.sdrOffsetMHz;
+            sdrLockAcquired = meshMetrics.sdrLockAcquired;
+            sdrMeshReady = meshMetrics.sdrMeshReady;
+            sdrTimestampUtc = meshMetrics.sdrTimestampUtc;
+            sdrServiceRunning = meshMetrics.sdrServiceRunning;
+            sdrServiceLastUpdatedUtc = meshMetrics.sdrServiceLastUpdatedUtc;
+            sdrServiceIntervalSeconds = meshMetrics.sdrServiceIntervalSeconds;
+            sdrServiceError = meshMetrics.sdrServiceError;
+            sdrServiceSuccessCount = meshMetrics.sdrServiceSuccessCount;
+            sdrServiceAutostart = meshMetrics.sdrServiceAutostart;
+            sdrLogPath = meshMetrics.sdrLogPath || sdrLogPath;
+            activeNodes = Math.max(activeNodes, Number(hubMesh?.activePeakCount || 0));
+            if (mountedRef.current) setSdrSnapshot(hubMesh);
+          }
+
+          nextLogs.push(buildLog({
+            type: "NETWORK",
+            title: "Signal hub",
+            payload: `${distributionHealth} · ${activeNodes} noeuds · ${meshFeedCount} events distribues`,
+            source: hubData?.source || "mamo-signal-hub",
+            details: {
+              threatScore: hubData?.distribution?.threatScore,
+              lastMeshEventUtc,
+              meshAvailable: hubData?.mesh?.available,
+            },
+            severity: distributionHealth === "ready" ? "ok" : distributionHealth === "watch" ? "warning" : "critical",
+          }));
+        } else {
+          nextLogs.push(buildLog({
+            type: "ALERT",
+            title: "Signal hub indisponible",
+            payload: hubData?.detail || `signal_hub_${hubResult.value.status}`,
+            source: "mamo-signal-hub",
+            severity: "warning",
+          }));
+        }
+      } else {
+        nextLogs.push(buildLog({
+          type: "ALERT",
+          title: "Signal hub indisponible",
+          payload: normalizeErrorMessage(hubResult.reason, "Impossible de lire le signal-hub"),
+          source: "mamo-signal-hub",
+          severity: "warning",
+        }));
+      }
 
       if (defenderResult.status === "fulfilled") {
         try {
@@ -547,25 +703,27 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
         }
         if (meshResult.value.ok) {
           if (mountedRef.current) setSdrSnapshot(meshData);
-          sdrBridge = "connected";
-          sdrServiceRunning = Boolean(meshData?.service?.running ?? sdrServiceRunning);
-          sdrServiceLastUpdatedUtc = meshData?.service?.lastUpdatedUtc || sdrServiceLastUpdatedUtc;
-          sdrServiceIntervalSeconds = Number(meshData?.service?.intervalSeconds || sdrServiceIntervalSeconds || 0);
-          sdrServiceError = meshData?.service?.lastError?.message || sdrServiceError;
-          sdrServiceSuccessCount = Number(meshData?.service?.successCount || sdrServiceSuccessCount || 0);
-          sdrServiceAutostart = Boolean(meshData?.service?.autostart ?? sdrServiceAutostart);
-          sdrLogPath = meshData?.service?.logPath || sdrLogPath;
-          sdrPeakDb = Number(meshData?.peakPowerDb || 0);
-          sdrPeakHz = Number(meshData?.peakFrequencyMHz || 0) * 1_000_000;
-          sdrBandwidthKHz = Number(meshData?.spanKHz || 0);
-          scanLatencyMs = Number(meshData?.scanDurationMs || 0);
-          sdrActivePeaks = Number(meshData?.activePeakCount || 0);
-          sdrSnrDb = Number(meshData?.snrDb || 0);
-          sdrNoiseMeanDb = Number(meshData?.noiseMeanDb || 0);
-          sdrOffsetMHz = Number(meshData?.offsetMHz || 0);
-          sdrLockAcquired = Boolean(meshData?.lockAcquired);
-          sdrMeshReady = Boolean(meshData?.meshReady);
-          sdrTimestampUtc = meshData?.timestampUtc || "";
+          const meshMetrics = applyMeshSnapshotToMetrics(meshData, previousMetrics);
+          sdrBridge = meshMetrics.sdrBridge;
+          sdrPeakDb = meshMetrics.sdrPeakDb;
+          sdrPeakHz = meshMetrics.sdrPeakHz;
+          sdrBandwidthKHz = meshMetrics.sdrBandwidthKHz;
+          scanLatencyMs = meshMetrics.scanLatencyMs;
+          sdrActivePeaks = meshMetrics.sdrActivePeaks;
+          sdrSnrDb = meshMetrics.sdrSnrDb;
+          sdrNoiseMeanDb = meshMetrics.sdrNoiseMeanDb;
+          sdrOffsetMHz = meshMetrics.sdrOffsetMHz;
+          sdrLockAcquired = meshMetrics.sdrLockAcquired;
+          sdrMeshReady = meshMetrics.sdrMeshReady;
+          sdrTimestampUtc = meshMetrics.sdrTimestampUtc;
+          sdrServiceRunning = meshMetrics.sdrServiceRunning;
+          sdrServiceLastUpdatedUtc = meshMetrics.sdrServiceLastUpdatedUtc;
+          sdrServiceIntervalSeconds = meshMetrics.sdrServiceIntervalSeconds;
+          sdrServiceError = meshMetrics.sdrServiceError;
+          sdrServiceSuccessCount = meshMetrics.sdrServiceSuccessCount;
+          sdrServiceAutostart = meshMetrics.sdrServiceAutostart;
+          sdrLogPath = meshMetrics.sdrLogPath || sdrLogPath;
+          activeNodes = Math.max(activeNodes, Number(meshData?.activePeakCount || 0));
           nextLogs.push(buildLog({
             type: "SDR",
             title: "Snapshot mesh MAMO",
@@ -636,7 +794,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
       }
 
       const anomalyCount = nextLogs.filter((entry) => entry.severity !== "ok").length;
-      const threatScore = clamp(
+      const fallbackThreatScore = clamp(
         (defenderStatus === "ok" ? 8 : 30) +
           (sdrBridge === "connected" ? 4 : 32) +
           (sdrMeshReady ? 0 : sdrLockAcquired ? 10 : 24) +
@@ -645,10 +803,8 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
         0,
         100
       );
+      const threatScore = hubThreatScore > 0 ? clamp(hubThreatScore + anomalyCount * 2, 0, 100) : fallbackThreatScore;
 
-      const liveAddress = walletAddress || userAddress || "";
-      let blockEvents = 0;
-      let purchaseOrders = 0;
       if (liveAddress) {
         try {
           const balanceRes = await fetchWithTimeout(api(`/api/web3/balance/${liveAddress}`));
@@ -681,32 +837,38 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
 
       if (mountedRef.current) {
         setMetrics({
-        sdrBandwidthKHz,
-        scanLatencyMs,
-        sdrActivePeaks,
-        sdrSnrDb,
-        sdrNoiseMeanDb,
-        sdrOffsetMHz,
-        sdrLockAcquired,
-        sdrMeshReady,
-        sdrTimestampUtc,
-        blockEvents,
-        purchaseOrders,
-        alerts: anomalyCount,
-        threatScore,
-        devicesDetected,
-        defenderStatus,
-        sdrBridge,
-        sdrPeakDb,
-        sdrPeakHz,
-        sdrServiceRunning,
-        sdrServiceLastUpdatedUtc,
-        sdrServiceIntervalSeconds,
-        sdrServiceError,
-        sdrServiceSuccessCount,
-        sdrServiceAutostart,
-        sdrLogPath,
-        sdrLogEntryCount,
+          sdrBandwidthKHz,
+          scanLatencyMs,
+          sdrActivePeaks,
+          sdrSnrDb,
+          sdrNoiseMeanDb,
+          sdrOffsetMHz,
+          sdrLockAcquired,
+          sdrMeshReady,
+          sdrTimestampUtc,
+          blockEvents,
+          purchaseOrders,
+          alerts: anomalyCount,
+          threatScore,
+          devicesDetected,
+          defenderStatus,
+          sdrBridge,
+          sdrPeakDb,
+          sdrPeakHz,
+          sdrServiceRunning,
+          sdrServiceLastUpdatedUtc,
+          sdrServiceIntervalSeconds,
+          sdrServiceError,
+          sdrServiceSuccessCount,
+          sdrServiceAutostart,
+          sdrLogPath,
+          sdrLogEntryCount,
+          activeNodes: Math.max(activeNodes, sdrActivePeaks),
+          distributionHealth,
+          lastMeshEventUtc,
+          meshFeedCount,
+          bankingAuthorized,
+          hubAvailable,
         });
       }
 
@@ -744,6 +906,9 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
     () => (sdrSnapshot?.activePeaks ? sdrSnapshot.activePeaks : sdrSnapshot?.scan?.summary?.activePeaks || []),
     [sdrSnapshot]
   );
+  const eventsCardValue = walletAddress || userAddress ? metrics.blockEvents : "Wallet";
+  const ordersCardValue = authToken ? metrics.purchaseOrders : metrics.bankingAuthorized ? metrics.purchaseOrders : "Prive";
+  const activeNodesValue = metrics.activeNodes || metrics.sdrActivePeaks || 0;
 
   return (
     <section className="panel glass neon">
@@ -794,7 +959,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
             </div>
           </div>
 
-          {panel === "overview" && <div className="grid two"><MetricBox label="Bande SDR" value={`${metrics.sdrBandwidthKHz} kHz`} icon={Activity} /><MetricBox label="Latence scan" value={`${metrics.scanLatencyMs} ms`} icon={Gauge} /><MetricBox label="SNR" value={`${metrics.sdrSnrDb.toFixed(2)} dB`} icon={Radio} /><MetricBox label="Offset" value={`${formatSigned(metrics.sdrOffsetMHz, 4)} MHz`} icon={Network} /><MetricBox label="Lock" value={metrics.sdrLockAcquired ? "Oui" : "Non"} icon={Lock} /><MetricBox label="Events chain" value={metrics.blockEvents} icon={Database} /><MetricBox label="Ordres banking" value={metrics.purchaseOrders} icon={Wallet} /><MetricBox label="Risque reel" value={`${metrics.threatScore}/100`} icon={Shield} /><div className="card"><h3>Etat du pont</h3><div className="tcv-list"><div className="tcv-list-item"><div><strong>Frequence MAMO</strong><p>Canal mesh principal</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{MAMO_MESH_CENTER_MHZ} MHz</span></div><div className="tcv-list-item"><div><strong>UTC</strong><p>Horodatage de reference du snapshot</p></div><span className="ok">{metrics.sdrTimestampUtc || "-"}</span></div><div className="tcv-list-item"><div><strong>Service mesh</strong><p>Worker partage pour toute la plateforme</p></div><span className={metrics.sdrServiceRunning ? "ok" : "warn"}>{metrics.sdrServiceRunning ? "actif" : "arrete"}</span></div><div className="tcv-list-item"><div><strong>Cadence</strong><p>Intervalle du service</p></div><span className={metrics.sdrServiceRunning ? "ok" : "warn"}>{metrics.sdrServiceIntervalSeconds ? `${metrics.sdrServiceIntervalSeconds}s` : "-"}</span></div><div className="tcv-list-item"><div><strong>Mesh ready</strong><p>Synchro exploitable pour le reseau</p></div><span className={metrics.sdrMeshReady ? "ok" : "warn"}>{metrics.sdrMeshReady ? "oui" : "non"}</span></div><div className="tcv-list-item"><div><strong>Bruit moyen</strong><p>Niveau de fond radio</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrNoiseMeanDb ? `${metrics.sdrNoiseMeanDb.toFixed(2)} dB` : "-"}</span></div><div className="tcv-list-item"><div><strong>Pic radio</strong><p>Dernier snapshot partage</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrPeakHz ? `${formatFrequencyMHz(metrics.sdrPeakHz)} MHz` : "-"}</span></div><div className="tcv-list-item"><div><strong>Devices</strong><p>Detection navigateur</p></div><span className="ok">{metrics.devicesDetected}</span></div></div></div><div className="card"><h3>Distribution</h3><p className="muted">Le moteur publie un export local dans `mamo-stream-pro-export`, emet l'evenement `mamo-stream-pro:update` et distribue maintenant un snapshot mesh partage via `/api/sdr/mesh` pour les autres modules MAMO.</p></div></div>}
+          {panel === "overview" && <div className="grid two"><MetricBox label="Bande SDR" value={metrics.sdrBandwidthKHz ? `${metrics.sdrBandwidthKHz} kHz` : "-"} icon={Activity} /><MetricBox label="Latence scan" value={metrics.scanLatencyMs ? `${metrics.scanLatencyMs.toFixed(0)} ms` : "-"} icon={Gauge} /><MetricBox label="Noeuds actifs" value={activeNodesValue || "-"} icon={Network} /><MetricBox label="SNR" value={`${Number(metrics.sdrSnrDb || 0).toFixed(2)} dB`} icon={Radio} /><MetricBox label="Offset" value={`${formatSigned(Number(metrics.sdrOffsetMHz || 0), 4)} MHz`} icon={Activity} /><MetricBox label="Events chain" value={eventsCardValue} icon={Database} /><MetricBox label="Ordres banking" value={ordersCardValue} icon={Wallet} /><MetricBox label="Risque reel" value={`${metrics.threatScore}/100`} icon={Shield} /><div className="card"><h3>Etat du pont</h3><div className="tcv-list"><div className="tcv-list-item"><div><strong>Frequence MAMO</strong><p>Canal mesh principal</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{MAMO_MESH_CENTER_MHZ} MHz</span></div><div className="tcv-list-item"><div><strong>UTC</strong><p>Horodatage de reference du snapshot</p></div><span className={metrics.sdrTimestampUtc ? "ok" : "warn"}>{metrics.sdrTimestampUtc || "-"}</span></div><div className="tcv-list-item"><div><strong>Service mesh</strong><p>Worker partage pour toute la plateforme</p></div><span className={metrics.sdrServiceRunning ? "ok" : "warn"}>{metrics.sdrServiceRunning ? "actif" : "arrete"}</span></div><div className="tcv-list-item"><div><strong>Cadence</strong><p>Intervalle du service</p></div><span className={metrics.sdrServiceRunning ? "ok" : "warn"}>{metrics.sdrServiceIntervalSeconds ? `${metrics.sdrServiceIntervalSeconds}s` : "-"}</span></div><div className="tcv-list-item"><div><strong>Mesh ready</strong><p>Synchro exploitable pour le reseau</p></div><span className={metrics.sdrMeshReady ? "ok" : "warn"}>{metrics.sdrMeshReady ? "oui" : "non"}</span></div><div className="tcv-list-item"><div><strong>Lock</strong><p>Etat de verrouillage radio</p></div><span className={metrics.sdrLockAcquired ? "ok" : "warn"}>{metrics.sdrLockAcquired ? "oui" : "non"}</span></div><div className="tcv-list-item"><div><strong>Bruit moyen</strong><p>Niveau de fond radio</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{Number.isFinite(metrics.sdrNoiseMeanDb) && metrics.sdrNoiseMeanDb !== 0 ? `${metrics.sdrNoiseMeanDb.toFixed(2)} dB` : "-"}</span></div><div className="tcv-list-item"><div><strong>Pic radio</strong><p>Dernier snapshot partage</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrPeakHz ? `${formatFrequencyMHz(metrics.sdrPeakHz)} MHz` : "-"}</span></div></div></div><div className="card"><h3>Distribution</h3><div className="tcv-list"><div className="tcv-list-item"><div><strong>Signal hub</strong><p>Agregateur prive de la plateforme</p></div><span className={metrics.hubAvailable ? "ok" : "warn"}>{metrics.hubAvailable ? "actif" : "hors ligne"}</span></div><div className="tcv-list-item"><div><strong>Sante distribution</strong><p>Resume mesh + defender + banking</p></div><span className={metrics.distributionHealth === "ready" ? "ok" : "warn"}>{metrics.distributionHealth}</span></div><div className="tcv-list-item"><div><strong>Dernier event mesh</strong><p>Chronologie du hub</p></div><span>{metrics.lastMeshEventUtc || "-"}</span></div><div className="tcv-list-item"><div><strong>Feed distribue</strong><p>Evenements relayes vers MAMO</p></div><span>{metrics.meshFeedCount || 0}</span></div><div className="tcv-list-item"><div><strong>Journal JSONL</strong><p>Entrees chargees depuis le service</p></div><span>{metrics.sdrLogEntryCount || 0}</span></div><div className="tcv-list-item"><div><strong>Devices</strong><p>Detection navigateur</p></div><span className={metrics.devicesDetected ? "ok" : "warn"}>{metrics.devicesDetected || 0}</span></div></div><p className="muted">La vue generale tient maintenant sur les snapshots caches, le signal-hub et le journal mesh JSONL. Si une route secondaire repond mal, les cadrans gardent leur dernier etat utile.</p></div></div>}
 
           {panel === "architecture" && <div className="grid two">{MAMO_STACK_MODULES.map((module) => <div key={module.title} className="card"><div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}><h3 style={{ margin: 0 }}>{module.title}</h3><span className="tcv-chip tcv-chip-amber">{module.role}</span></div><div className="tcv-list" style={{ marginTop: 12 }}><KV label="Outil suggere" value={module.tool} /><KV label="Role" value={module.detail} /></div></div>)}<div className="card"><h3>Profil radio mesh</h3><div className="tcv-list"><KV label="Centre" value={`${MAMO_MESH_CENTER_MHZ} MHz`} /><KV label="Span" value={`${MAMO_MESH_SPAN_KHZ} kHz`} /><KV label="Bin" value={`${MAMO_MESH_BIN_KHZ} kHz`} /><KV label="Gain" value={`${MAMO_MESH_GAIN_DB} dB`} /><KV label="Integration" value={`${MAMO_MESH_INTEGRATION_SECONDS} s`} /></div></div><div className="card"><h3>Modules operateurs</h3><div className="tcv-list"><KV label="Protocole mesh" value="Reticulum ou Meshtastic" /><KV label="Monitoring" value="Grafana + Loki" /><KV label="Distribution" value="Event mamo-stream-pro:update + export local + /api/sdr/mesh partage" /><KV label="Registre" value={MAMO_MESH_LOG_KEYS.join(", ")} /><KV label="Journal JSONL" value={metrics.sdrLogPath || "backend/data/mamo-mesh-log.jsonl"} /></div></div><CodeCard title="Probe service JSON" code={MAMO_PROBE_COMMAND} onCopy={copyText} /><CodeCard title="Tail journal mesh" code={MAMO_LOG_TAIL_COMMAND} onCopy={copyText} /><CodeCard title="Probe direct hardware" code={MAMO_DIRECT_PROBE_COMMAND} onCopy={copyText} /><CodeCard title="Commandes backend" code={MAMO_BACKEND_COMMANDS} onCopy={copyText} /><CodeCard title="Schema logs mesh" code={MAMO_MESH_LOG_SCHEMA} onCopy={copyText} /></div>}
 
