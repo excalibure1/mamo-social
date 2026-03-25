@@ -858,10 +858,14 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     }));
   }, [api, registrySnapshot]);
 
-  const filteredItems = useMemo(
-    () => mediaData.filter((item) => item.category === currentTab),
-    [mediaData, currentTab]
-  );
+  const filteredItems = useMemo(() => {
+    const tab = (currentTab || "").toLowerCase();
+    const matches = mediaData.filter((item) => (item.category || "").toLowerCase() === tab);
+    if (matches.length) return matches;
+    // Si le registre renvoie des categories inattendues, on repasse sur le catalogue fallback.
+    const fallback = createFallbackCatalog().filter((item) => (item.category || "").toLowerCase() === tab);
+    return fallback;
+  }, [mediaData, currentTab]);
   const cdnNodes = useMemo(() => registrySnapshot?.nodes || [], [registrySnapshot]);
   const syncQueue = useMemo(() => registrySnapshot?.syncQueue || [], [registrySnapshot]);
   const replicationService = registrySnapshot?.service || {};
