@@ -7,6 +7,7 @@ import MamoDefenderPro from "./MamoDefenderPro";
 import SimqModule from "./SimqModule";
 import MamoCdn from "./MamoCdn";
 import MamoTcvStation from "./MamoTcvStation";
+import MamoStreamPro from "./MamoStreamPro";
 
 const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:8000").trim();
 const API = (path) => (BACKEND_URL ? `${BACKEND_URL}${path}` : path);
@@ -253,6 +254,7 @@ export default function App() {
       { id: "simq", label: "SIMQ" },
       { id: "cdn", label: "Mamo CDN" },
       { id: "tcv", label: "MAMO tCV", vip: true },
+      { id: "streampro", label: "Mamo Stream Pro", privateOnly: true },
       { id: "telecom", label: "Mamo telecom" },
       { id: "meteo", label: "MAMO meteo" },
       { id: "options", label: "Options" },
@@ -632,6 +634,10 @@ export default function App() {
     [digitalId, isChef]
   );
   const hasPremiumAccess = useMemo(() => isElite || isLocalDevHost, [isElite]);
+  const hasPrivateAccess = useMemo(
+    () => isLocalDevHost || hasChefSession || digitalId?.id === CHEF_ID || normalize(digitalId?.role) === normalize(CHEF_PLAN),
+    [isLocalDevHost, hasChefSession, digitalId]
+  );
 
   const remainingMinutes = sessionMeta
     ? Math.max(0, Math.ceil((SESSION_TIMEOUT_MS - (Date.now() - (sessionMeta.lastActivityAt || Date.now()))) / 60000))
@@ -657,6 +663,10 @@ export default function App() {
     if (tab.vip && !hasPremiumAccess) {
       setShowUpgradeModal(true);
       pushNotif("Zone VIP verrouillee. Pass Elite requis.", "warning");
+      return;
+    }
+    if (tab.privateOnly && !hasPrivateAccess) {
+      pushNotif("Moteur prive reserve au Chef ou a l'environnement local.", "warning");
       return;
     }
     setActiveTab(tab.id);
@@ -1437,6 +1447,17 @@ export default function App() {
                   {!hasPremiumAccess && <button onClick={() => setShowUpgradeModal(true)}>Debloquer</button>}
                 </div>
               </div>
+
+              <div className="card">
+                <h3>Mamo Stream Pro</h3>
+                <p className="muted">Moteur prive d'agregation pour redistribuer wallet, banking, web3, defender et futures donnees SDR live vers les autres modules.</p>
+                <p className={hasPrivateAccess ? "ok" : "warn"}>
+                  {hasPrivateAccess ? "Acces prive autorise sur cet environnement." : "Reserve a toi en local ou a une session Chef."}
+                </p>
+                <div className="row">
+                  <button onClick={() => setActiveTab("streampro")}>Ouvrir Stream Pro</button>
+                </div>
+              </div>
             </div>
           </section>
         )}
@@ -1802,6 +1823,19 @@ export default function App() {
         )}
 
         {activeTab === "tcv" && hasPremiumAccess && <MamoTcvStation />}
+
+        {activeTab === "streampro" && !hasPrivateAccess && (
+          <section className="panel glass neon">
+            <h2>Mamo Stream Pro - Moteur prive</h2>
+            <p className="warn">
+              Ce moteur reste reserve a Capitaine Refractaire en local ou a une session Chef validee. Il n'est pas expose au public.
+            </p>
+          </section>
+        )}
+
+        {activeTab === "streampro" && hasPrivateAccess && (
+          <MamoStreamPro api={API} authToken={walletJwt} userAddress={userAddress} isLocalDevHost={isLocalDevHost} />
+        )}
 
         {activeTab === "telecom" && (
           <section className="panel glass neon">
