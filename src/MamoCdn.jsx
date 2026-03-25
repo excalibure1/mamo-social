@@ -152,6 +152,8 @@ const FALLBACK_SYNC_LINES = [
   "> HUB OPERATIONNEL.",
 ];
 
+const STREAM_PRO_STORAGE_KEY = "mamo-stream-pro-state-v2";
+
 let hlsLoaderPromise = null;
 
 function buildCdnRegistryUrl(api, userAddress) {
@@ -314,6 +316,111 @@ function buildMeshSignalHubFallback(meshSnapshot, meshService) {
       threatScore: meshSnapshot.meshReady ? 18 : meshSnapshot.lockAcquired ? 34 : 56,
       lastMeshEventUtc: meshSnapshot.timestampUtc || "",
     },
+  };
+}
+
+function readStreamProState() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(STREAM_PRO_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildStreamProBridgePayload(streamProState) {
+  if (!streamProState || typeof streamProState !== "object") return null;
+  const metrics = streamProState.metrics || {};
+  const sdrSnapshot = streamProState.sdrSnapshot || null;
+  const meshLogTail = Array.isArray(streamProState.meshLogTail) ? streamProState.meshLogTail : [];
+  const hubSnapshot = streamProState.hubSnapshot || null;
+
+  if (!sdrSnapshot && !hubSnapshot && !meshLogTail.length) return null;
+
+  const meshServicePayload = {
+    ...(sdrSnapshot?.service || {}),
+    running: Boolean(sdrSnapshot?.service?.running ?? metrics.sdrServiceRunning),
+    intervalSeconds: toNumber(sdrSnapshot?.service?.intervalSeconds, toNumber(metrics.sdrServiceIntervalSeconds, 0)),
+    lastUpdatedUtc: sdrSnapshot?.service?.lastUpdatedUtc || metrics.sdrServiceLastUpdatedUtc || metrics.sdrTimestampUtc || "",
+    successCount: toNumber(sdrSnapshot?.service?.successCount, toNumber(metrics.sdrServiceSuccessCount, 0)),
+    autostart: Boolean(sdrSnapshot?.service?.autostart ?? metrics.sdrServiceAutostart),
+    logPath: sdrSnapshot?.service?.logPath || metrics.sdrLogPath || "",
+  };
+
+  const fallbackHub = buildMeshSignalHubFallback(sdrSnapshot, meshServicePayload);
+  const fallbackLogCount = Math.max(meshLogTail.length, toNumber(metrics.sdrLogEntryCount, 0));
+  let signalHubPayload = hubSnapshot ? {
+    ...hubSnapshot,
+    source: hubSnapshot.source || "mamo-stream-pro-cache",
+    timestampUtc: hubSnapshot.timestampUtc || metrics.lastMeshEventUtc || metrics.sdrTimestampUtc || "",
+    mesh: {
+      ...(hubSnapshot.mesh || {}),
+      available: Boolean((hubSnapshot.mesh || {}).available || sdrSnapshot),
+      snapshot: hubSnapshot?.mesh?.snapshot || sdrSnapshot || null,
+      service: {
+        ...(hubSnapshot?.mesh?.service || {}),
+        ...meshServicePayload,
+      },
+      logPath: hubSnapshot?.mesh?.logPath || metrics.sdrLogPath || meshServicePayload.logPath || "",
+      logCount: Math.max(toNumber(hubSnapshot?.mesh?.logCount, 0), fallbackLogCount),
+      logTail: Array.isArray(hubSnapshot?.mesh?.logTail) && hubSnapshot.mesh.logTail.length ? hubSnapshot.mesh.logTail : meshLogTail,
+    },
+    telecom: {
+      ...(hubSnapshot.telecom || {}),
+      activeNodes: Math.max(
+        toNumber(hubSnapshot?.telecom?.activeNodes, 0),
+        toNumber(metrics.activeNodes, 0),
+        toNumber(sdrSnapshot?.activePeakCount, 0)
+      ),
+      meshFeed: Array.isArray(hubSnapshot?.telecom?.meshFeed) ? hubSnapshot.telecom.meshFeed : [],
+    },
+    distribution: {
+      ...(hubSnapshot.distribution || {}),
+      health: hubSnapshot?.distribution?.health || metrics.distributionHealth || fallbackHub?.distribution?.health || "watch",
+      lastMeshEventUtc: hubSnapshot?.distribution?.lastMeshEventUtc || metrics.lastMeshEventUtc || metrics.sdrTimestampUtc || "",
+      threatScore: toNumber(hubSnapshot?.distribution?.threatScore, toNumber(metrics.threatScore, 0)),
+    },
+  } : null;
+
+  if (!signalHubPayload && fallbackHub) {
+    signalHubPayload = {
+      ...fallbackHub,
+      source: "mamo-stream-pro-cache",
+      timestampUtc: metrics.lastMeshEventUtc || metrics.sdrTimestampUtc || fallbackHub.timestampUtc || "",
+      mesh: {
+        ...fallbackHub.mesh,
+        logPath: meshServicePayload.logPath || fallbackHub.mesh.logPath || "",
+        logCount: fallbackLogCount,
+        logTail: meshLogTail,
+      },
+      telecom: {
+        ...fallbackHub.telecom,
+        activeNodes: Math.max(fallbackHub.telecom.activeNodes, toNumber(metrics.activeNodes, 0)),
+      },
+      distribution: {
+        ...fallbackHub.distribution,
+        health: metrics.distributionHealth || fallbackHub.distribution.health || "watch",
+        lastMeshEventUtc: metrics.lastMeshEventUtc || metrics.sdrTimestampUtc || fallbackHub.distribution.lastMeshEventUtc || "",
+        threatScore: toNumber(metrics.threatScore, fallbackHub.distribution.threatScore),
+      },
+    };
+  }
+
+  const cdnServicePayload = {
+    running: Boolean(metrics.sdrServiceRunning || meshServicePayload.running),
+    intervalSeconds: toNumber(metrics.sdrServiceIntervalSeconds, meshServicePayload.intervalSeconds),
+    processedJobs: Math.max(toNumber(metrics.meshFeedCount, 0), toNumber(metrics.sdrServiceSuccessCount, 0)),
+    lastUpdatedUtc: metrics.sdrServiceLastUpdatedUtc || metrics.sdrTimestampUtc || "",
+    autostart: Boolean(metrics.sdrServiceAutostart || meshServicePayload.autostart),
+    logPath: metrics.sdrLogPath || meshServicePayload.logPath || "",
+  };
+
+  return {
+    signalHubPayload,
+    meshServicePayload,
+    meshPayload: sdrSnapshot,
+    cdnServicePayload,
   };
 }
 
@@ -580,6 +687,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   const playerRootRef = useRef(null);
   const syncCancelledRef = useRef(false);
   const mountedRef = useRef(true);
+  const registrySnapshotRef = useRef(null);
   const previewVideoRefs = useRef(new Map());
   const previewIntervalRef = useRef(0);
   const previewPlayPromiseRef = useRef(null);
@@ -645,6 +753,10 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   );
 
   useEffect(() => {
+    registrySnapshotRef.current = registrySnapshot;
+  }, [registrySnapshot]);
+
+  useEffect(() => {
     return () => {
       mountedRef.current = false;
       syncCancelledRef.current = true;
@@ -674,6 +786,19 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     try {
       const headers = {};
       if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const streamProBridge = buildStreamProBridgePayload(readStreamProState());
+
+      if (mountedRef.current && !registrySnapshotRef.current && streamProBridge) {
+        setRegistrySnapshot(mergeLiveRegistrySnapshot({
+          registryPayload: null,
+          signalHubPayload: streamProBridge.signalHubPayload,
+          cdnServicePayload: streamProBridge.cdnServicePayload,
+          meshServicePayload: streamProBridge.meshServicePayload,
+          meshPayload: streamProBridge.meshPayload,
+        }));
+        setRegistryError("");
+      }
+
       const [registryResult, hubResult, cdnServiceResult, meshServiceResult, meshResult] = await Promise.allSettled([
         fetchWithTimeout(buildCdnRegistryUrl(api, userAddress), { headers }),
         fetchWithTimeout(buildSignalHubUrl(api, userAddress), { headers }),
@@ -706,10 +831,10 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
 
       const payload = mergeLiveRegistrySnapshot({
         registryPayload,
-        signalHubPayload: hubPayload,
-        cdnServicePayload,
-        meshServicePayload,
-        meshPayload,
+        signalHubPayload: hubPayload || streamProBridge?.signalHubPayload || null,
+        cdnServicePayload: cdnServicePayload || streamProBridge?.cdnServicePayload || null,
+        meshServicePayload: meshServicePayload || streamProBridge?.meshServicePayload || null,
+        meshPayload: meshPayload || streamProBridge?.meshPayload || null,
       });
 
       if (!payload?.catalog?.length && !payload?.nodes?.length && !payload?.signalHub) {
@@ -719,7 +844,14 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
 
       if (mountedRef.current) {
         setRegistrySnapshot(payload);
-        const liveAvailable = Boolean(hubPayload || meshPayload || meshServicePayload || cdnServicePayload);
+        const liveAvailable = Boolean(
+          hubPayload ||
+          meshPayload ||
+          meshServicePayload ||
+          cdnServicePayload ||
+          streamProBridge?.signalHubPayload ||
+          streamProBridge?.meshPayload
+        );
         setRegistryError(registryPayload || liveAvailable ? "" : "cdn_registry_unavailable");
       }
       return payload;
