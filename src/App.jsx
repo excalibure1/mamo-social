@@ -1806,7 +1806,9 @@ export default function App() {
           </section>
         )}
 
-        {activeTab === "defender" && hasChefSession && <MamoDefenderPro />}
+        {activeTab === "defender" && hasChefSession && (
+          <MamoDefenderPro api={API} authToken={walletJwt} userAddress={userAddress} isLocalDevHost={isLocalDevHost} />
+        )}
 
         {activeTab === "simq" && <SimqModule />}
 
@@ -1841,7 +1843,7 @@ export default function App() {
           <section className="panel glass neon">
             <h2>Mamo telecom</h2>
             <p className="muted">Comms P2P privÃ© : flux mesh, chat sÃ©curisÃ©, cam-to-cam, recherche de pairs.</p>
-            <MamoTelecom />
+            <MamoTelecom api={API} authToken={walletJwt} userAddress={userAddress} isLocalDevHost={isLocalDevHost} />
           </section>
         )}
 

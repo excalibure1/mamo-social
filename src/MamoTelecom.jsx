@@ -1,7 +1,6 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
-  Bell,
   ChevronRight,
   FileText,
   Globe,
@@ -12,7 +11,7 @@ import {
   MicOff,
   Paperclip,
   PhoneOff,
-  Radio,
+  RefreshCw,
   Search,
   Send,
   Shield,
@@ -25,17 +24,69 @@ import {
   X,
 } from "lucide-react";
 
-const MOCK_CONTACTS = [
-  { id: "n1", name: "Mamo Alpha", alias: "@alpha_prime", status: "online", type: "trusted" },
-  { id: "n2", name: "Station Delta", alias: "@delta_node", status: "online", type: "peer" },
-  { id: "n3", name: "Observateur 77", alias: "@obs_77", status: "offline", type: "peer" },
+const FALLBACK_CONTACTS = [
+  { id: "mesh-core", name: "MAMO Mesh Core", alias: "@mesh_core", status: "offline", type: "trusted", meta: "Service en attente" },
+  { id: "defender-core", name: "Defender Core", alias: "@defender_core", status: "offline", type: "trusted", meta: "Defender non synchronise" },
 ];
 
-const MOCK_MESH_FEED = [
-  { id: 1, author: "Système", text: "Réseau P2P initialisé. Connexions chiffrées actives.", time: "12:00", isSystem: true },
-  { id: 2, author: "Station Delta", text: "Quelqu'un capte le signal sur la fréquence 433 ?", time: "12:05", isSystem: false },
-  { id: 3, author: "Mamo Alpha", text: "Affirmatif. Le relais fonctionne bien ici.", time: "12:08", isSystem: false },
+const FALLBACK_FEED = [
+  {
+    id: "fallback-feed-1",
+    author: "MAMO Mesh",
+    text: "Le hub de distribution attend le prochain snapshot mesh.",
+    time: "--:--:--",
+    isSystem: true,
+    severity: "warning",
+  },
 ];
+
+function shortAddress(value) {
+  if (!value) return "Moi (Local)";
+  if (value.length < 12) return value;
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+function buildHubUrl(api, userAddress) {
+  const base = api("/api/platform/signal-hub");
+  const params = new URLSearchParams({ logLimit: "10" });
+  if (userAddress) params.set("walletAddress", userAddress);
+  return `${base}?${params.toString()}`;
+}
+
+function dedupeContacts(contacts) {
+  const map = new Map();
+  contacts.forEach((contact) => {
+    if (!contact?.id) return;
+    if (!map.has(contact.id)) map.set(contact.id, contact);
+  });
+  return Array.from(map.values());
+}
+
+function normalizeContacts(rawContacts = []) {
+  if (!Array.isArray(rawContacts) || !rawContacts.length) return FALLBACK_CONTACTS;
+  return rawContacts.map((contact, index) => ({
+    id: contact.id || `remote-contact-${index}`,
+    name: contact.name || "Node MAMO",
+    alias: contact.alias || `@node_${index + 1}`,
+    status: contact.status === "online" ? "online" : "offline",
+    type: contact.type || "peer",
+    meta: contact.meta || "",
+    source: "remote",
+  }));
+}
+
+function normalizeFeed(rawFeed = []) {
+  if (!Array.isArray(rawFeed) || !rawFeed.length) return FALLBACK_FEED;
+  return rawFeed.map((entry, index) => ({
+    id: entry.id || `remote-feed-${index}`,
+    author: entry.author || "MAMO Mesh",
+    text: entry.text || "Message distribue",
+    time: entry.time || "--:--:--",
+    isSystem: Boolean(entry.isSystem),
+    severity: entry.severity || "ok",
+    timestampUtc: entry.timestampUtc || "",
+  }));
+}
 
 function VideoCallInterface({ contact, onHangUp }) {
   const [isCamOn, setIsCamOn] = useState(true);
@@ -69,7 +120,7 @@ function VideoCallInterface({ contact, onHangUp }) {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         setActiveStream(stream);
       } catch {
-        setMediaError("Permission refusée ou caméra introuvable.");
+        setMediaError("Permission refusee ou camera introuvable.");
         setIsCamOn(false);
         setIsMicOn(false);
       }
@@ -110,13 +161,12 @@ function VideoCallInterface({ contact, onHangUp }) {
         setIsMicOn(true);
         setMediaError(null);
       } catch {
-        setMediaError("Impossible de redémarrer la caméra.");
+        setMediaError("Impossible de reactiver la camera.");
       }
       return;
     }
 
     if (isCamOn) {
-      // Stop réel des tracks vidéo -> LED caméra s'éteint.
       current.getVideoTracks().forEach((track) => {
         try {
           track.stop();
@@ -137,7 +187,7 @@ function VideoCallInterface({ contact, onHangUp }) {
       setIsCamOn(true);
       setMediaError(null);
     } catch {
-      setMediaError("Impossible de réactiver la caméra.");
+      setMediaError("Impossible de reactiver la camera.");
       setIsCamOn(false);
     }
   };
@@ -162,8 +212,8 @@ function VideoCallInterface({ contact, onHangUp }) {
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <Shield size={16} style={{ color: "#22c55e" }} />
           <div>
-            <strong style={{ color: "#fff" }}>Lien sécurisé : {contact.name}</strong>
-            <div className="telecom-muted">E2EE • Latence: 24ms • Canal: P2P</div>
+            <strong style={{ color: "#fff" }}>Lien securise : {contact.name}</strong>
+            <div className="telecom-muted">E2EE | Latence locale | Canal prive</div>
           </div>
         </div>
         <div className="telecom-chip">{formatTime(callDuration)}</div>
@@ -171,7 +221,7 @@ function VideoCallInterface({ contact, onHangUp }) {
 
       <div className="telecom-body two-cols">
         <div className="telecom-video-card">
-          <div className="telecom-overlay">Réception du flux de {contact.alias}...</div>
+          <div className="telecom-overlay">Reception du flux de {contact.alias}...</div>
           <UserCircle size={64} style={{ color: "#475569" }} />
         </div>
         <div className="telecom-video-card">
@@ -179,14 +229,14 @@ function VideoCallInterface({ contact, onHangUp }) {
           {(!isCamOn || mediaError) && (
             <div className="telecom-overlay">
               <VideoOff size={28} />
-              <div>{mediaError || "Caméra désactivée"}</div>
+              <div>{mediaError || "Camera desactivee"}</div>
             </div>
           )}
         </div>
       </div>
 
       <div className="telecom-controls">
-        <button className={isMicOn ? "telecom-btn" : "telecom-btn danger"} onClick={() => setIsMicOn((v) => !v)}>
+        <button className={isMicOn ? "telecom-btn" : "telecom-btn danger"} onClick={() => setIsMicOn((value) => !value)}>
           {isMicOn ? <Mic size={18} /> : <MicOff size={18} />}
         </button>
         <button className="telecom-btn hangup" onClick={handleHangUp}>
@@ -201,11 +251,11 @@ function VideoCallInterface({ contact, onHangUp }) {
 }
 
 function PrivateChat({ contact }) {
-  const [messages, setMessages] = useState([{ id: 1, sender: "them", text: "Connexion établie. Tu me reçois ?", time: "12:00" }]);
+  const [messages, setMessages] = useState([{ id: 1, sender: "them", text: "Connexion etablie. Tu me recois ?", time: "12:00" }]);
   const [input, setInput] = useState("");
 
-  const handleSend = (e) => {
-    e.preventDefault();
+  const handleSend = (event) => {
+    event.preventDefault();
     if (!input.trim()) return;
     setMessages((prev) => [
       ...prev,
@@ -219,7 +269,7 @@ function PrivateChat({ contact }) {
       <div className="telecom-header">
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div className="telecom-dot online" />
-          <strong style={{ color: "#fff" }}>Chat Privé : {contact.name}</strong>
+          <strong style={{ color: "#fff" }}>Chat prive : {contact.name}</strong>
         </div>
         <Lock size={16} style={{ color: "#22c55e" }} />
       </div>
@@ -237,8 +287,8 @@ function PrivateChat({ contact }) {
         <input
           type="text"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={`Message sécurisé à ${contact.name}...`}
+          onChange={(event) => setInput(event.target.value)}
+          placeholder={`Message securise a ${contact.name}...`}
         />
         <button type="submit">
           <Send size={16} />
@@ -248,20 +298,72 @@ function PrivateChat({ contact }) {
   );
 }
 
-export default function MamoTelecom() {
+export default function MamoTelecom({ api = (path) => path, authToken = "", userAddress = "", isLocalDevHost = false }) {
   const [activeView, setActiveView] = useState("feed");
   const [selectedContact, setSelectedContact] = useState(null);
   const [expandedContactId, setExpandedContactId] = useState(null);
-  const [contacts, setContacts] = useState(MOCK_CONTACTS);
+  const [remoteContacts, setRemoteContacts] = useState(FALLBACK_CONTACTS);
+  const [manualContacts, setManualContacts] = useState([]);
+  const [dismissedContactIds, setDismissedContactIds] = useState([]);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearchingNetwork, setIsSearchingNetwork] = useState(false);
-  const [meshMessages, setMeshMessages] = useState(MOCK_MESH_FEED);
+  const [remoteMeshMessages, setRemoteMeshMessages] = useState(FALLBACK_FEED);
+  const [localMeshMessages, setLocalMeshMessages] = useState([]);
   const [meshInput, setMeshInput] = useState("");
   const [isMeshBroadcasting, setIsMeshBroadcasting] = useState(false);
   const [meshStream, setMeshStream] = useState(null);
+  const [isRefreshingHub, setIsRefreshingHub] = useState(false);
+  const [hubError, setHubError] = useState("");
+  const [hubSnapshot, setHubSnapshot] = useState(null);
+  const [lastHubSync, setLastHubSync] = useState("");
   const meshVideoRef = useRef(null);
   const fileInputRef = useRef(null);
+
+  const operatorLabel = userAddress ? shortAddress(userAddress) : isLocalDevHost ? "Capitaine Refractaire" : "Moi (Local)";
+
+  const contacts = useMemo(
+    () =>
+      dedupeContacts([...manualContacts, ...remoteContacts]).filter(
+        (contact) => !dismissedContactIds.includes(contact.id)
+      ),
+    [dismissedContactIds, manualContacts, remoteContacts]
+  );
+
+  const meshMessages = useMemo(() => [...remoteMeshMessages, ...localMeshMessages], [localMeshMessages, remoteMeshMessages]);
+  const telecomChannel = hubSnapshot?.telecom?.channel || {};
+  const meshSnapshot = hubSnapshot?.mesh?.snapshot || null;
+  const activeNodes = hubSnapshot?.telecom?.activeNodes || contacts.length || 0;
+
+  const refreshTelecomHub = async (silent = false) => {
+    if (!silent) setIsRefreshingHub(true);
+    try {
+      const headers = {};
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const response = await fetch(buildHubUrl(api, userAddress), { headers });
+      if (!response.ok) {
+        throw new Error(`hub_${response.status}`);
+      }
+      const payload = await response.json();
+      setHubSnapshot(payload);
+      setRemoteContacts(normalizeContacts(payload?.telecom?.contacts));
+      setRemoteMeshMessages(normalizeFeed(payload?.telecom?.meshFeed));
+      setHubError("");
+      setLastHubSync(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    } catch (error) {
+      setHubError(String(error?.message || "hub_unavailable"));
+    } finally {
+      if (!silent) setIsRefreshingHub(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshTelecomHub(false);
+    const intervalId = window.setInterval(() => {
+      refreshTelecomHub(true);
+    }, 8000);
+    return () => window.clearInterval(intervalId);
+  }, [api, authToken, userAddress]);
 
   const startCommunication = (contact, type) => {
     setSelectedContact(contact);
@@ -269,7 +371,8 @@ export default function MamoTelecom() {
   };
 
   const removeContact = (contactId) => {
-    setContacts((prev) => prev.filter((c) => c.id !== contactId));
+    setManualContacts((prev) => prev.filter((contact) => contact.id !== contactId));
+    setDismissedContactIds((prev) => (prev.includes(contactId) ? prev : [...prev, contactId]));
     if (expandedContactId === contactId) setExpandedContactId(null);
     if (selectedContact?.id === contactId) {
       setSelectedContact(null);
@@ -282,52 +385,58 @@ export default function MamoTelecom() {
     setSelectedContact(null);
   };
 
-  const handleSearchPeer = (e) => {
-    e.preventDefault();
+  const handleSearchPeer = (event) => {
+    event.preventDefault();
     if (!searchQuery.trim()) return;
     setIsSearchingNetwork(true);
     setTimeout(() => {
+      const alias = searchQuery.startsWith("@") ? searchQuery : `@${searchQuery}`;
       const newContact = {
-        id: `n${Date.now()}`,
-        name: "Nouveau Pair Mamo",
-        alias: searchQuery.startsWith("@") ? searchQuery : `@${searchQuery}`,
+        id: `manual-${Date.now()}`,
+        name: "Pair MAMO ajoute",
+        alias,
         status: "online",
         type: "peer",
+        meta: "Ajout manuel depuis Telecom",
+        source: "manual",
       };
-      setContacts((prev) => [newContact, ...prev]);
+      setManualContacts((prev) => [newContact, ...prev]);
+      setDismissedContactIds((prev) => prev.filter((id) => id !== newContact.id));
       setSearchQuery("");
       setIsSearchingNetwork(false);
       setShowSearch(false);
-    }, 1500);
+    }, 900);
   };
 
-  const handleSendMeshMessage = (e) => {
-    e.preventDefault();
+  const handleSendMeshMessage = (event) => {
+    event.preventDefault();
     if (!meshInput.trim()) return;
     const newMsg = {
-      id: Date.now(),
-      author: "Moi (Local)",
+      id: `local-msg-${Date.now()}`,
+      author: operatorLabel,
       text: meshInput,
-      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
       isSystem: false,
+      severity: "ok",
     };
-    setMeshMessages((prev) => [...prev, newMsg]);
+    setLocalMeshMessages((prev) => [...prev, newMsg]);
     setMeshInput("");
   };
 
-  const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
+  const handleFileUpload = (event) => {
+    const file = event.target.files?.[0];
     if (!file) return;
     const newMsg = {
-      id: Date.now(),
-      author: "Moi (Local)",
-      text: `Fichier transféré : ${file.name} (${(file.size / 1024).toFixed(1)} KB)`,
-      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      id: `local-file-${Date.now()}`,
+      author: operatorLabel,
+      text: `Fichier transfere : ${file.name} (${(file.size / 1024).toFixed(1)} KB)`,
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
       isSystem: false,
       isFile: true,
+      severity: "ok",
     };
-    setMeshMessages((prev) => [...prev, newMsg]);
-    e.target.value = "";
+    setLocalMeshMessages((prev) => [...prev, newMsg]);
+    event.target.value = "";
   };
 
   const toggleMeshBroadcast = async () => {
@@ -363,14 +472,31 @@ export default function MamoTelecom() {
     <div className="telecom-layout">
       <aside className="telecom-side">
         <div className="telecom-card">
-          <h3 style={{ margin: 0, color: "#fff" }}>MAMO TELECOM</h3>
-          <p className="telecom-muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <Activity size={12} /> Centre de comms privé
-          </p>
-          <div className="telecom-chip" style={{ marginTop: 10, display: "inline-flex", gap: 6 }}>
-            <UserCircle size={14} />
-            Moi (Local)
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+            <div>
+              <h3 style={{ margin: 0, color: "#fff" }}>MAMO TELECOM</h3>
+              <p className="telecom-muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <Activity size={12} /> Backbone mesh distribue
+              </p>
+            </div>
+            <button className="telecom-icon-btn" onClick={() => refreshTelecomHub(false)} title="Rafraichir le hub">
+              <RefreshCw size={15} className={isRefreshingHub ? "spin" : ""} />
+            </button>
           </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+            <div className="telecom-chip" style={{ display: "inline-flex", gap: 6 }}>
+              <UserCircle size={14} />
+              {operatorLabel}
+            </div>
+            <div className="telecom-chip">{telecomChannel.frequencyMHz ? `${Number(telecomChannel.frequencyMHz).toFixed(3)} MHz` : "Canal en attente"}</div>
+            <div className="telecom-chip">{telecomChannel.quality || "offline"}</div>
+          </div>
+
+          <div className="telecom-muted" style={{ marginTop: 10 }}>
+            {telecomChannel.serviceRunning ? "Service mesh actif" : "Service mesh en attente"} | {activeNodes} noeuds | sync {lastHubSync || "--:--:--"}
+          </div>
+          {hubError ? <div className="warn" style={{ marginTop: 8 }}>Hub: {hubError}</div> : null}
         </div>
 
         <button className={activeView === "feed" ? "telecom-nav active" : "telecom-nav"} onClick={endCommunication}>
@@ -381,16 +507,16 @@ export default function MamoTelecom() {
           <div className="telecom-contacts-header">
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <Users size={16} />
-              <strong>Pairs détectés</strong>
+              <strong>Pairs distribues</strong>
             </div>
-            <button className="telecom-icon-btn" onClick={() => setShowSearch((v) => !v)}>
+            <button className="telecom-icon-btn" onClick={() => setShowSearch((value) => !value)}>
               <UserPlus size={15} />
             </button>
           </div>
 
           {showSearch && (
             <form onSubmit={handleSearchPeer} className="telecom-search-row">
-              <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Alias P2P..." />
+              <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Alias P2P..." />
               <button type="submit" disabled={isSearchingNetwork || !searchQuery.trim()}>
                 {isSearchingNetwork ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
               </button>
@@ -406,6 +532,7 @@ export default function MamoTelecom() {
                     <div style={{ textAlign: "left" }}>
                       <div style={{ color: "#e2e8f0", fontSize: 13 }}>{contact.name}</div>
                       <div className="telecom-muted">{contact.alias}</div>
+                      {contact.meta ? <div className="telecom-muted" style={{ fontSize: 11 }}>{contact.meta}</div> : null}
                     </div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -413,8 +540,8 @@ export default function MamoTelecom() {
                       type="button"
                       className="telecom-trash-btn"
                       title={`Supprimer ${contact.name}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
+                      onClick={(event) => {
+                        event.stopPropagation();
                         removeContact(contact.id);
                       }}
                     >
@@ -452,11 +579,26 @@ export default function MamoTelecom() {
             <div className="telecom-header">
               <div>
                 <h2 style={{ margin: 0, color: "#fff", display: "flex", gap: 8, alignItems: "center" }}>
-                  <Globe size={18} /> Flux Mesh Décentralisé
+                  <Globe size={18} /> Flux Mesh Distribue
                 </h2>
-                <p className="telecom-muted">Canal public • Nœuds actifs: 42</p>
+                <p className="telecom-muted">
+                  Canal prive alimente par le journal mesh JSONL | {activeNodes} noeuds | {meshSnapshot?.quality || "offline"}
+                </p>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div className="telecom-chip">{meshSnapshot?.lockAcquired ? "LOCK" : "SEARCH"}</div>
+                <div className="telecom-muted" style={{ marginTop: 6 }}>
+                  SNR {meshSnapshot?.snrDb ?? "-"} dB | Latence {meshSnapshot?.scanDurationMs ?? "-"} ms
+                </div>
               </div>
             </div>
+
+            {hubError ? (
+              <div className="telecom-msg system" style={{ marginBottom: 12 }}>
+                <strong>Hub indisponible</strong>
+                <p>Le flux reste local tant que l'agregateur backend ne repond pas.</p>
+              </div>
+            ) : null}
 
             <div className="telecom-feed">
               {meshMessages.map((msg) => (
@@ -479,7 +621,7 @@ export default function MamoTelecom() {
               {isMeshBroadcasting && (
                 <div className="telecom-live">
                   <div className="telecom-live-badge">
-                    <Radio size={12} /> EN DIRECT (PUBLIC)
+                    <Activity size={12} /> EN DIRECT
                   </div>
                   <video ref={meshVideoRef} autoPlay muted playsInline className="telecom-video" />
                   <button className="telecom-close-live" onClick={toggleMeshBroadcast}>
@@ -497,7 +639,7 @@ export default function MamoTelecom() {
               <button type="button" onClick={toggleMeshBroadcast} className={isMeshBroadcasting ? "danger" : ""}>
                 <Video size={16} />
               </button>
-              <input value={meshInput} onChange={(e) => setMeshInput(e.target.value)} placeholder="Message public ou document..." />
+              <input value={meshInput} onChange={(event) => setMeshInput(event.target.value)} placeholder="Message prive ou document a distribuer..." />
               <button type="submit">
                 <Send size={16} />
               </button>

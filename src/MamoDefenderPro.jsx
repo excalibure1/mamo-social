@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Shield,
   Activity,
@@ -93,6 +93,28 @@ const TELEMETRY = [
   { icon: Users, label: "Appareils suivis" },
 ];
 
+function buildSignalHubUrl(api, userAddress) {
+  const base = api("/api/platform/signal-hub");
+  const params = new URLSearchParams({ logLimit: "10" });
+  if (userAddress) params.set("walletAddress", userAddress);
+  return `${base}?${params.toString()}`;
+}
+
+function formatHubTime(value) {
+  if (!value) return "--:--:--";
+  try {
+    return new Date(value).toLocaleTimeString("fr-CA", { hour12: false });
+  } catch {
+    return String(value).slice(11, 19) || "--:--:--";
+  }
+}
+
+function levelFromThreatScore(score) {
+  if (score >= 50) return "Eleve";
+  if (score >= 25) return "Moyen";
+  return "Faible";
+}
+
 function StatusBadge({ text }) {
   const low = String(text || "").toLowerCase();
   const danger = low.includes("bloq") || low.includes("quarantaine") || low.includes("eleve");
@@ -151,7 +173,7 @@ function StatCard({ icon: Icon, title, value, hint }) {
   );
 }
 
-export default function MamoDefenderPro() {
+export default function MamoDefenderPro({ api = (path) => path, authToken = "", userAddress = "" }) {
   const checkboxStyle = { flex: "0 0 auto", width: 18, height: 18, padding: 0, borderRadius: 4 };
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedLevel, setSelectedLevel] = useState("Toutes");
@@ -166,8 +188,27 @@ export default function MamoDefenderPro() {
   const [lastRefresh, setLastRefresh] = useState("11:42:12");
   const [auditTrail, setAuditTrail] = useState(AUDIT_SEED);
   const [load, setLoad] = useState({ cpu: 38, ram: 54, latency: 18, db: 92, ws: 97, disk: 71 });
+  const [signalHub, setSignalHub] = useState(null);
+  const [hubError, setHubError] = useState("");
 
   const chefVerified = chefSignature.trim().startsWith("0xMAMO") && chefSignature.trim().length >= 12;
+
+  const fetchSignalHub = useCallback(async () => {
+    try {
+      const headers = {};
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const response = await fetch(buildSignalHubUrl(api, userAddress), { headers });
+      if (!response.ok) {
+        throw new Error(`signal_hub_${response.status}`);
+      }
+      const payload = await response.json();
+      setSignalHub(payload);
+      setHubError("");
+      setLastRefresh(new Date().toLocaleTimeString("fr-CA", { hour12: false }));
+    } catch (error) {
+      setHubError(String(error?.message || "signal_hub_unavailable"));
+    }
+  }, [api, authToken, userAddress]);
 
   useEffect(() => {
     const randomStep = (v, min, max, up = 4, down = 3) => Math.max(min, Math.min(max, v + (Math.random() > 0.5 ? up : -down)));
@@ -185,33 +226,126 @@ export default function MamoDefenderPro() {
     return () => window.clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    fetchSignalHub();
+    const intervalId = window.setInterval(() => {
+      fetchSignalHub();
+    }, 9000);
+    return () => window.clearInterval(intervalId);
+  }, [fetchSignalHub]);
+
+  useEffect(() => {
+    if (!signalHub) return;
+    if (signalHub?.mesh?.available) setIsSimMode(false);
+
+    const derivedAudit = (signalHub?.telecom?.meshFeed || []).slice(0, 6).map((entry, index) => ({
+      id: `hub-audit-${index}-${entry.id || entry.time || index}`,
+      time: entry.time || formatHubTime(entry.timestampUtc),
+      actor: entry.author || "Mesh Hub",
+      action: entry.text || "Evenement distribue",
+      result: entry.severity === "critical" ? "Critique" : entry.severity === "warning" ? "Surveillance" : "Stable",
+    }));
+
+    setAuditTrail(derivedAudit.length ? derivedAudit : AUDIT_SEED);
+  }, [signalHub]);
+
+  const liveThreats = useMemo(() => {
+    if (!signalHub) return THREATS;
+
+    const snapshot = signalHub?.mesh?.snapshot;
+    const distribution = signalHub?.distribution || {};
+    const banking = signalHub?.banking || {};
+    const defender = signalHub?.defender || {};
+    const nextThreats = [];
+
+    if (snapshot) {
+      nextThreats.push({
+        id: "mesh-link",
+        level: snapshot.meshReady ? "Faible" : snapshot.lockAcquired ? "Moyen" : "Eleve",
+        source: "Mesh Hub",
+        title: snapshot.meshReady ? "Canal mesh verrouille" : snapshot.lockAcquired ? "Verrouillage partiel du mesh" : "Verrouillage mesh absent",
+        detail: `SNR ${snapshot.snrDb} dB | offset ${snapshot.offsetMHz} MHz | ${snapshot.activePeakCount} pics actifs.`,
+        time: formatHubTime(snapshot.timestampUtc),
+        status: snapshot.quality || "searching",
+      });
+    }
+
+    if (signalHub?.mesh?.error) {
+      nextThreats.push({
+        id: "mesh-error",
+        level: "Eleve",
+        source: "Mesh Service",
+        title: "Erreur de distribution mesh",
+        detail: signalHub.mesh.error,
+        time: formatHubTime(signalHub.timestampUtc),
+        status: "Degrade",
+      });
+    }
+
+    if (defender.status && defender.status !== "ok") {
+      nextThreats.push({
+        id: "defender-status",
+        level: "Moyen",
+        source: "Mamora Defender",
+        title: "Defender signale un etat degrade",
+        detail: `Provider ${defender.provider || "Mamora Defender"} en mode ${defender.status}.`,
+        time: formatHubTime(signalHub.timestampUtc),
+        status: defender.status,
+      });
+    }
+
+    if (userAddress && banking.available && !banking.authorized) {
+      nextThreats.push({
+        id: "banking-auth",
+        level: "Faible",
+        source: "Banking Relay",
+        title: "Flux banking non autorise pour ce wallet",
+        detail: `Le hub voit le wallet ${userAddress}, mais les ordres restent verrouilles tant que la session signee n'est pas valide.`,
+        time: formatHubTime(signalHub.timestampUtc),
+        status: banking.reason || "locked",
+      });
+    }
+
+    if (distribution.threatScore >= 45) {
+      nextThreats.push({
+        id: "distribution-threat",
+        level: levelFromThreatScore(distribution.threatScore),
+        source: "Signal Hub",
+        title: "Risque distribue eleve",
+        detail: `Score ${distribution.threatScore}/100 sur les canaux ${Array.isArray(distribution.channels) ? distribution.channels.join(", ") : "mesh"}.`,
+        time: formatHubTime(signalHub.timestampUtc),
+        status: distribution.health || "watch",
+      });
+    }
+
+    return nextThreats.length ? nextThreats : THREATS;
+  }, [signalHub, userAddress]);
+
   const metrics = useMemo(() => {
-    const secureScore = isLockdown ? 99 : zeroTrust && spectralWatch && autoFreeze ? 96 : 78;
-    const walletRisk = isLockdown ? 4 : chefVerified ? 18 : 33;
-    const radioRisk = spectralWatch ? (isSimMode ? 18 : 27) : 51;
-    const overall = isLockdown ? "NOIR" : THREATS.some((t) => t.level === "Eleve") ? "ROUGE" : THREATS.some((t) => t.level === "Moyen") ? "JAUNE" : "VERT";
+    const threatScore = Number(signalHub?.distribution?.threatScore ?? 0);
+    const meshSnapshot = signalHub?.mesh?.snapshot;
+    const secureScore = isLockdown ? 99 : threatScore ? Math.max(8, 100 - threatScore) : zeroTrust && spectralWatch && autoFreeze ? 96 : 78;
+    const walletRisk = isLockdown ? 4 : signalHub?.banking?.authorized ? Math.max(6, Math.round(threatScore * 0.45)) : chefVerified ? 18 : 33;
+    const radioRisk = spectralWatch
+      ? meshSnapshot
+        ? Math.max(6, Math.min(95, 100 - Math.round(Number(meshSnapshot.snrDb || 0) * 7)))
+        : isSimMode
+          ? 18
+          : 27
+      : 51;
+    const overall = isLockdown ? "NOIR" : threatScore >= 50 ? "ROUGE" : threatScore >= 25 ? "JAUNE" : "VERT";
     return { secureScore, walletRisk, radioRisk, overall };
-  }, [isLockdown, zeroTrust, spectralWatch, autoFreeze, chefVerified, isSimMode]);
+  }, [autoFreeze, chefVerified, isLockdown, isSimMode, signalHub, spectralWatch, zeroTrust]);
 
   const filteredThreats = useMemo(() => {
-    if (selectedLevel === "Toutes") return THREATS;
-    return THREATS.filter((t) => t.level === selectedLevel);
-  }, [selectedLevel]);
+    if (selectedLevel === "Toutes") return liveThreats;
+    return liveThreats.filter((threat) => threat.level === selectedLevel);
+  }, [liveThreats, selectedLevel]);
 
-  const runRefresh = () => {
+  const runRefresh = async () => {
     setIsRefreshing(true);
-    setLastRefresh(new Date().toLocaleTimeString("fr-CA", { hour12: false }));
-    setAuditTrail((prev) => [
-      {
-        id: `aud-refresh-${Date.now()}`,
-        time: new Date().toLocaleTimeString("fr-CA", { hour12: false }),
-        actor: "Command Center",
-        action: "Rafraichissement manuel",
-        result: "Synchronisation terminee",
-      },
-      ...prev,
-    ].slice(0, 8));
-    window.setTimeout(() => setIsRefreshing(false), 700);
+    await fetchSignalHub();
+    window.setTimeout(() => setIsRefreshing(false), 500);
   };
 
   const rootStyle = {
@@ -228,9 +362,11 @@ export default function MamoDefenderPro() {
           <StatusBadge text="MAMO DEFENDER V4 PRO" />
           <StatusBadge text="Acces Chef uniquement" />
           <StatusBadge text={`Niveau ${metrics.overall}`} />
+          {signalHub?.distribution?.health ? <StatusBadge text={`Hub ${signalHub.distribution.health}`} /> : null}
         </div>
         <h2 style={{ marginTop: 10 }}>Console defensive avancee pour la station MAMO</h2>
-        <p className="muted">Validation Chef, telemetrie, audit, SDR et protocole LOCKDOWN centralises.</p>
+        <p className="muted">Validation Chef, telemetrie, audit, SDR et protocole LOCKDOWN centralises sur le signal hub distribue.</p>
+        {hubError ? <p className="warn" style={{ marginTop: 8 }}>Hub: {hubError}</p> : null}
         <div className="row" style={{ flexWrap: "wrap" }}>
           <button className="row"><Shield size={14} /> Panneau Chef</button>
           <button className="row" onClick={() => setActiveTab("audit")}><TerminalSquare size={14} /> Logs vivants</button>
@@ -240,10 +376,10 @@ export default function MamoDefenderPro() {
       </div>
 
       <div className="grid two" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", marginTop: 12 }}>
-        <StatCard icon={Shield} title="Indice securite" value={`${metrics.secureScore}%`} hint="Synthese du noyau heuristique" />
-        <StatCard icon={Wallet} title="Risque wallet" value={`${metrics.walletRisk}%`} hint="Exposition replay/contract" />
-        <StatCard icon={Radio} title="Risque spectral" value={`${metrics.radioRisk}%`} hint={isSimMode ? "Mode simulation" : "Mode hardware"} />
-        <StatCard icon={Cpu} title="CPU / RAM" value={`${load.cpu}% / ${load.ram}%`} hint={`Latence ${load.latency}ms`} />
+        <StatCard icon={Shield} title="Indice securite" value={`${metrics.secureScore}%`} hint={`Hub ${signalHub?.distribution?.health || "local"}`} />
+        <StatCard icon={Wallet} title="Risque wallet" value={`${metrics.walletRisk}%`} hint={signalHub?.banking?.authorized ? "Flux banking autorise" : "Exposition replay/contract"} />
+        <StatCard icon={Radio} title="Risque spectral" value={`${metrics.radioRisk}%`} hint={signalHub?.mesh?.snapshot ? `${signalHub.mesh.snapshot.targetFrequencyMHz} MHz | SNR ${signalHub.mesh.snapshot.snrDb} dB` : isSimMode ? "Mode simulation" : "Mode hardware"} />
+        <StatCard icon={Cpu} title="CPU / RAM" value={`${load.cpu}% / ${load.ram}%`} hint={`Latence ${signalHub?.mesh?.snapshot?.scanDurationMs || load.latency}ms`} />
       </div>
 
       <div className="card" style={{ marginTop: 12 }}>
@@ -294,7 +430,16 @@ export default function MamoDefenderPro() {
           <div className="card">
             <h3>Etat des sous-systemes</h3>
             {SERVICES.map((name) => {
-              const ok = name === "Cloud Tunnel Watch" ? !isLockdown : name === "Chef Signature Gate" ? chefVerified : name === "Controle Spectral SDR" ? spectralWatch : true;
+              const ok =
+                name === "Cloud Tunnel Watch"
+                  ? !isLockdown && signalHub?.defender?.status === "ok"
+                  : name === "Chef Signature Gate"
+                    ? chefVerified
+                    : name === "Controle Spectral SDR"
+                      ? spectralWatch && Boolean(signalHub?.mesh?.available)
+                      : name === "Base de logs securisee"
+                        ? Number(signalHub?.mesh?.logCount || 0) > 0
+                        : true;
               return (
                 <div key={name} className="row card" style={{ justifyContent: "space-between", marginBottom: 8 }}>
                   <span style={{ fontSize: 13 }}>{name}</span>
@@ -344,7 +489,13 @@ export default function MamoDefenderPro() {
                 return <div key={i} style={{ height: `${h}%`, borderRadius: "6px 6px 2px 2px", background: "linear-gradient(180deg,#7dd3fc,#0ea5e9,#1e3a8a)" }} />;
               })}
             </div>
-            <p className="muted" style={{ marginTop: 8 }}>{isSimMode ? "Mode simulation" : "Mode hardware"}</p>
+            <p className="muted" style={{ marginTop: 8 }}>
+              {signalHub?.mesh?.snapshot
+                ? `Canal ${signalHub.mesh.snapshot.targetFrequencyMHz} MHz | qualite ${signalHub.mesh.snapshot.quality}`
+                : isSimMode
+                  ? "Mode simulation"
+                  : "Mode hardware"}
+            </p>
           </div>
           <div className="card">
             <h3>Telemetrie radio</h3>
