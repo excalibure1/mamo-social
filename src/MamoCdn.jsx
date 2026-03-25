@@ -153,6 +153,18 @@ const FALLBACK_SYNC_LINES = [
 ];
 
 const STREAM_PRO_STORAGE_KEY = "mamo-stream-pro-state-v2";
+const DEFAULT_CDN_SOURCE_DIAGNOSTICS = {
+  refreshedAt: "",
+  mergeSources: [],
+  items: [
+    { id: "registry", label: "Registre CDN", state: "pending", detail: "En attente de lecture." },
+    { id: "signal-hub", label: "Signal hub", state: "pending", detail: "En attente de lecture." },
+    { id: "stream-pro-cache", label: "Stream Pro cache", state: "pending", detail: "En attente de lecture." },
+    { id: "mesh-service", label: "Service mesh", state: "pending", detail: "En attente de lecture." },
+    { id: "mesh-snapshot", label: "Snapshot mesh", state: "pending", detail: "En attente de lecture." },
+    { id: "cdn-service", label: "Worker CDN", state: "pending", detail: "En attente de lecture." },
+  ],
+};
 
 let hlsLoaderPromise = null;
 
@@ -319,6 +331,31 @@ function buildMeshSignalHubFallback(meshSnapshot, meshService) {
   };
 }
 
+function normalizeDiagnosticDetail(value, fallbackText) {
+  if (!value) return fallbackText;
+  const text = String(value);
+  return text.length > 120 ? `${text.slice(0, 117)}...` : text;
+}
+
+function describeSettledSource(result, ok, detail, missingLabel) {
+  if (ok) {
+    return { state: "ok", detail };
+  }
+  if (!result) {
+    return { state: "pending", detail: "En attente." };
+  }
+  if (result.status === "fulfilled") {
+    return {
+      state: "missing",
+      detail: normalizeDiagnosticDetail(`HTTP ${result.value.status} | ${missingLabel}`, missingLabel),
+    };
+  }
+  return {
+    state: "missing",
+    detail: normalizeDiagnosticDetail(result.reason?.message || result.reason || missingLabel, missingLabel),
+  };
+}
+
 function readStreamProState() {
   if (typeof window === "undefined") return null;
   try {
@@ -421,6 +458,98 @@ function buildStreamProBridgePayload(streamProState) {
     meshServicePayload,
     meshPayload: sdrSnapshot,
     cdnServicePayload,
+  };
+}
+
+function buildSourceDiagnostics({
+  registryResult,
+  hubResult,
+  cdnServiceResult,
+  meshServiceResult,
+  meshResult,
+  registryPayload,
+  hubPayload,
+  cdnServicePayload,
+  meshServicePayload,
+  meshPayload,
+  streamProBridge,
+  mergedPayload,
+}) {
+  const mergeSources = [];
+  if (registryPayload) mergeSources.push("registre");
+  if (hubPayload) mergeSources.push("signal-hub");
+  if (meshPayload) mergeSources.push("mesh");
+  if (streamProBridge?.signalHubPayload || streamProBridge?.meshPayload) mergeSources.push("stream-pro-cache");
+
+  const items = [
+    {
+      id: "registry",
+      label: "Registre CDN",
+      ...describeSettledSource(
+        registryResult,
+        Boolean(registryPayload),
+        `${toNumber(registryPayload?.summary?.nodeCount, 0)} nodes | ${toNumber(registryPayload?.summary?.queuedSyncJobs, 0)} jobs`,
+        "Registre CDN introuvable."
+      ),
+    },
+    {
+      id: "signal-hub",
+      label: "Signal hub",
+      ...describeSettledSource(
+        hubResult,
+        Boolean(hubPayload),
+        `${toNumber(hubPayload?.telecom?.activeNodes, 0)} nodes | ${hubPayload?.distribution?.health || "watch"}`,
+        "Signal hub indisponible."
+      ),
+    },
+    {
+      id: "stream-pro-cache",
+      label: "Stream Pro cache",
+      state: streamProBridge?.signalHubPayload || streamProBridge?.meshPayload ? "fallback" : "missing",
+      detail: streamProBridge?.signalHubPayload || streamProBridge?.meshPayload
+        ? `${toNumber(streamProBridge?.signalHubPayload?.telecom?.activeNodes, 0)} nodes | ${streamProBridge?.signalHubPayload?.distribution?.health || "watch"}`
+        : "Aucun snapshot local de MamoStream Pro.",
+    },
+    {
+      id: "mesh-service",
+      label: "Service mesh",
+      ...describeSettledSource(
+        meshServiceResult,
+        Boolean(meshServicePayload),
+        `${meshServicePayload?.running ? "actif" : "arrete"} | ${toNumber(meshServicePayload?.intervalSeconds, 0)}s`,
+        "Service mesh indisponible."
+      ),
+    },
+    {
+      id: "mesh-snapshot",
+      label: "Snapshot mesh",
+      ...describeSettledSource(
+        meshResult,
+        Boolean(meshPayload),
+        `${meshPayload?.quality || "watch"} | ${toNumber(meshPayload?.activePeakCount, 0)} pics`,
+        "Snapshot mesh indisponible."
+      ),
+    },
+    {
+      id: "cdn-service",
+      label: "Worker CDN",
+      ...describeSettledSource(
+        cdnServiceResult,
+        Boolean(cdnServicePayload),
+        `${cdnServicePayload?.running ? "actif" : "pause"} | ${toNumber(cdnServicePayload?.processedJobs, 0)} jobs`,
+        "Service CDN indisponible."
+      ),
+    },
+  ];
+
+  if (mergedPayload?.signalHub?.mesh?.snapshot && !mergeSources.includes("merge-live")) {
+    mergeSources.push("fusion-live");
+  }
+
+  return {
+    refreshedAt: mergedPayload?.timestampUtc || new Date().toISOString(),
+    mergeSources,
+    items,
   };
 }
 
@@ -706,6 +835,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
   const [registrySnapshot, setRegistrySnapshot] = useState(null);
   const [registryLoading, setRegistryLoading] = useState(false);
   const [registryError, setRegistryError] = useState("");
+  const [sourceDiagnostics, setSourceDiagnostics] = useState(DEFAULT_CDN_SOURCE_DIAGNOSTICS);
 
   const mediaData = useMemo(() => {
     const source = registrySnapshot?.catalog?.length ? registrySnapshot.catalog : createFallbackCatalog();
@@ -789,12 +919,27 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
       const streamProBridge = buildStreamProBridgePayload(readStreamProState());
 
       if (mountedRef.current && !registrySnapshotRef.current && streamProBridge) {
-        setRegistrySnapshot(mergeLiveRegistrySnapshot({
+        const cachedPayload = mergeLiveRegistrySnapshot({
           registryPayload: null,
           signalHubPayload: streamProBridge.signalHubPayload,
           cdnServicePayload: streamProBridge.cdnServicePayload,
           meshServicePayload: streamProBridge.meshServicePayload,
           meshPayload: streamProBridge.meshPayload,
+        });
+        setRegistrySnapshot(cachedPayload);
+        setSourceDiagnostics(buildSourceDiagnostics({
+          registryResult: null,
+          hubResult: null,
+          cdnServiceResult: null,
+          meshServiceResult: null,
+          meshResult: null,
+          registryPayload: null,
+          hubPayload: null,
+          cdnServicePayload: null,
+          meshServicePayload: null,
+          meshPayload: null,
+          streamProBridge,
+          mergedPayload: cachedPayload,
         }));
         setRegistryError("");
       }
@@ -837,6 +982,21 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
         meshPayload: meshPayload || streamProBridge?.meshPayload || null,
       });
 
+      const diagnostics = buildSourceDiagnostics({
+        registryResult,
+        hubResult,
+        cdnServiceResult,
+        meshServiceResult,
+        meshResult,
+        registryPayload,
+        hubPayload,
+        cdnServicePayload,
+        meshServicePayload,
+        meshPayload,
+        streamProBridge,
+        mergedPayload: payload,
+      });
+
       if (!payload?.catalog?.length && !payload?.nodes?.length && !payload?.signalHub) {
         const registryStatus = registryResult.status === "fulfilled" ? registryResult.value.status : "unreachable";
         throw new Error(`cdn_registry_${registryStatus}`);
@@ -844,6 +1004,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
 
       if (mountedRef.current) {
         setRegistrySnapshot(payload);
+        setSourceDiagnostics(diagnostics);
         const liveAvailable = Boolean(
           hubPayload ||
           meshPayload ||
@@ -858,6 +1019,11 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     } catch (error) {
       if (mountedRef.current) {
         setRegistryError(String(error?.message || "cdn_registry_unavailable"));
+        setSourceDiagnostics((current) => ({
+          ...current,
+          refreshedAt: new Date().toISOString(),
+          mergeSources: current.mergeSources || [],
+        }));
       }
       return null;
     } finally {
@@ -1401,6 +1567,32 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
               ) : null}
             </div>
 
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+                <div>
+                  <h3 style={{ marginBottom: 6 }}>Diagnostic de raccordement</h3>
+                  <p className="muted" style={{ margin: 0 }}>
+                    Verification directe des sources que `Mamo CDN` utilise pour se raccorder a `MamoStream Pro`.
+                  </p>
+                </div>
+                <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+                  <span className="cdn-hub-pill" style={{ background: "rgba(6, 182, 212, 0.12)" }}>
+                    <Terminal size={14} color="#22d3ee" />
+                    <span>{sourceDiagnostics.mergeSources.length ? sourceDiagnostics.mergeSources.join(" + ") : "aucune fusion"}</span>
+                  </span>
+                  <span className="cdn-hub-pill" style={{ background: "rgba(15, 23, 42, 0.8)" }}>
+                    <MapPin size={14} color="#cbd5f5" />
+                    <span>{sourceDiagnostics.refreshedAt || "pas encore sonde"}</span>
+                  </span>
+                </div>
+              </div>
+              <div style={{ marginTop: 12, display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))" }}>
+                {sourceDiagnostics.items.map((item) => (
+                  <CdnDiagnosticRow key={item.id} item={item} />
+                ))}
+              </div>
+            </div>
+
             <div className="grid two" style={{ marginBottom: 16, alignItems: "start" }}>
               <div className="card">
                 <div className="row" style={{ justifyContent: "space-between" }}>
@@ -1678,5 +1870,46 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
         </div>
       )}
     </section>
+  );
+}
+
+function CdnDiagnosticRow({ item }) {
+  const tone = item.state === "ok"
+    ? { border: "rgba(34, 197, 94, 0.28)", background: "rgba(34, 197, 94, 0.10)", color: "#86efac", label: "OK" }
+    : item.state === "fallback"
+      ? { border: "rgba(6, 182, 212, 0.28)", background: "rgba(6, 182, 212, 0.10)", color: "#67e8f9", label: "FALLBACK" }
+      : item.state === "missing"
+        ? { border: "rgba(245, 158, 11, 0.28)", background: "rgba(245, 158, 11, 0.10)", color: "#fcd34d", label: "MANQUE" }
+        : { border: "rgba(148, 163, 184, 0.20)", background: "rgba(15, 23, 42, 0.72)", color: "#cbd5f5", label: "PENDING" };
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${tone.border}`,
+        background: tone.background,
+        borderRadius: 14,
+        padding: 12,
+        display: "grid",
+        gap: 8,
+      }}
+    >
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <strong style={{ color: "#fff" }}>{item.label}</strong>
+        <span
+          style={{
+            border: `1px solid ${tone.border}`,
+            background: "rgba(2, 6, 23, 0.42)",
+            color: tone.color,
+            borderRadius: 999,
+            padding: "4px 10px",
+            fontSize: 11,
+            letterSpacing: "0.08em",
+          }}
+        >
+          {tone.label}
+        </span>
+      </div>
+      <p className="muted" style={{ margin: 0, fontSize: 12 }}>{item.detail}</p>
+    </div>
   );
 }
