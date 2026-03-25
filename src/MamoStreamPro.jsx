@@ -85,6 +85,7 @@ const MAMO_MESH_LOG_SCHEMA = `{
 const MAMO_PROBE_COMMAND = `Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/sdr/mesh/service?auto_start=true | Select-Object -ExpandProperty Content
 Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/sdr/mesh | Select-Object -ExpandProperty Content`;
 const MAMO_DIRECT_PROBE_COMMAND = `python backend/scripts/mesh_sdr_probe.py --watch --format json`;
+const MAMO_LOG_TAIL_COMMAND = `Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/sdr/mesh/logs?limit=20 | Select-Object -ExpandProperty Content`;
 const MAMO_BACKEND_COMMANDS = `powershell -ExecutionPolicy Bypass -File "C:/Users/tommy/Documents/RoyaumeMamo/NouveauTravail/backend/scripts/start_mamo_mesh_service.ps1"
 powershell -ExecutionPolicy Bypass -File "C:/Users/tommy/Documents/RoyaumeMamo/NouveauTravail/backend/scripts/start_mamo_mesh_service.ps1" -Reload
 Invoke-WebRequest -Method Post -UseBasicParsing http://127.0.0.1:8000/api/sdr/mesh/service/start | Select-Object -ExpandProperty Content
@@ -254,6 +255,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
   const [logs, setLogs] = useState(saved?.logs || []);
   const [selectedLogId, setSelectedLogId] = useState(saved?.selectedLogId || "");
   const [sdrSnapshot, setSdrSnapshot] = useState(saved?.sdrSnapshot || null);
+  const [meshLogTail, setMeshLogTail] = useState([]);
   const [toast, setToast] = useState("");
   const [metrics, setMetrics] = useState({
     sdrBandwidthKHz: 0,
@@ -280,6 +282,8 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
     sdrServiceError: "",
     sdrServiceSuccessCount: 0,
     sdrServiceAutostart: false,
+    sdrLogPath: "",
+    sdrLogEntryCount: 0,
   });
   const feedRef = useRef(null);
   const copyText = async (label, value) => {
@@ -419,6 +423,8 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
       let sdrServiceError = "";
       let sdrServiceSuccessCount = 0;
       let sdrServiceAutostart = false;
+      let sdrLogPath = "";
+      let sdrLogEntryCount = 0;
       try {
         const res = await fetch(api("/api/defender/ping"));
         const data = await res.json();
@@ -440,6 +446,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
         sdrServiceError = serviceData?.lastError?.message || "";
         sdrServiceSuccessCount = Number(serviceData?.successCount || 0);
         sdrServiceAutostart = Boolean(serviceData?.autostart);
+        sdrLogPath = serviceData?.logPath || "";
         nextLogs.push(buildLog({
           type: "NETWORK",
           title: "Service mesh",
@@ -472,6 +479,7 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
         sdrServiceError = meshData?.service?.lastError?.message || sdrServiceError;
         sdrServiceSuccessCount = Number(meshData?.service?.successCount || sdrServiceSuccessCount || 0);
         sdrServiceAutostart = Boolean(meshData?.service?.autostart ?? sdrServiceAutostart);
+        sdrLogPath = meshData?.service?.logPath || sdrLogPath;
         sdrPeakDb = Number(meshData?.peakPowerDb || 0);
         sdrPeakHz = Number(meshData?.peakFrequencyMHz || 0) * 1_000_000;
         sdrBandwidthKHz = Number(meshData?.spanKHz || 0);
@@ -509,6 +517,26 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
           title: "SDR indisponible",
           payload: error?.message || "Impossible de lire le signal SDR",
           source: "backend-sdr",
+          severity: "warning",
+        }));
+      }
+
+      try {
+        const logsRes = await fetch(api("/api/sdr/mesh/logs?limit=8"), { headers: authHeaders });
+        const logsData = await logsRes.json();
+        if (!logsRes.ok) {
+          throw new Error(logsData?.detail || "sdr_mesh_logs_failed");
+        }
+        setMeshLogTail(Array.isArray(logsData?.entries) ? logsData.entries : []);
+        sdrLogPath = logsData?.path || sdrLogPath;
+        sdrLogEntryCount = Number(logsData?.count || 0);
+      } catch (error) {
+        setMeshLogTail([]);
+        nextLogs.push(buildLog({
+          type: "ALERT",
+          title: "Journal mesh indisponible",
+          payload: error?.message || "Impossible de lire le journal JSONL mesh",
+          source: "backend-sdr-log",
           severity: "warning",
         }));
       }
@@ -582,6 +610,8 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
         sdrServiceError,
         sdrServiceSuccessCount,
         sdrServiceAutostart,
+        sdrLogPath,
+        sdrLogEntryCount,
       });
 
       if (nextLogs.length) {
@@ -664,13 +694,13 @@ export default function MamoStreamPro({ api, authToken = "", userAddress = "", i
 
           {panel === "overview" && <div className="grid two"><MetricBox label="Bande SDR" value={`${metrics.sdrBandwidthKHz} kHz`} icon={Activity} /><MetricBox label="Latence scan" value={`${metrics.scanLatencyMs} ms`} icon={Gauge} /><MetricBox label="SNR" value={`${metrics.sdrSnrDb.toFixed(2)} dB`} icon={Radio} /><MetricBox label="Offset" value={`${formatSigned(metrics.sdrOffsetMHz, 4)} MHz`} icon={Network} /><MetricBox label="Lock" value={metrics.sdrLockAcquired ? "Oui" : "Non"} icon={Lock} /><MetricBox label="Events chain" value={metrics.blockEvents} icon={Database} /><MetricBox label="Ordres banking" value={metrics.purchaseOrders} icon={Wallet} /><MetricBox label="Risque reel" value={`${metrics.threatScore}/100`} icon={Shield} /><div className="card"><h3>Etat du pont</h3><div className="tcv-list"><div className="tcv-list-item"><div><strong>Frequence MAMO</strong><p>Canal mesh principal</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{MAMO_MESH_CENTER_MHZ} MHz</span></div><div className="tcv-list-item"><div><strong>UTC</strong><p>Horodatage de reference du snapshot</p></div><span className="ok">{metrics.sdrTimestampUtc || "-"}</span></div><div className="tcv-list-item"><div><strong>Service mesh</strong><p>Worker partage pour toute la plateforme</p></div><span className={metrics.sdrServiceRunning ? "ok" : "warn"}>{metrics.sdrServiceRunning ? "actif" : "arrete"}</span></div><div className="tcv-list-item"><div><strong>Cadence</strong><p>Intervalle du service</p></div><span className={metrics.sdrServiceRunning ? "ok" : "warn"}>{metrics.sdrServiceIntervalSeconds ? `${metrics.sdrServiceIntervalSeconds}s` : "-"}</span></div><div className="tcv-list-item"><div><strong>Mesh ready</strong><p>Synchro exploitable pour le reseau</p></div><span className={metrics.sdrMeshReady ? "ok" : "warn"}>{metrics.sdrMeshReady ? "oui" : "non"}</span></div><div className="tcv-list-item"><div><strong>Bruit moyen</strong><p>Niveau de fond radio</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrNoiseMeanDb ? `${metrics.sdrNoiseMeanDb.toFixed(2)} dB` : "-"}</span></div><div className="tcv-list-item"><div><strong>Pic radio</strong><p>Dernier snapshot partage</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrPeakHz ? `${formatFrequencyMHz(metrics.sdrPeakHz)} MHz` : "-"}</span></div><div className="tcv-list-item"><div><strong>Devices</strong><p>Detection navigateur</p></div><span className="ok">{metrics.devicesDetected}</span></div></div></div><div className="card"><h3>Distribution</h3><p className="muted">Le moteur publie un export local dans `mamo-stream-pro-export`, emet l'evenement `mamo-stream-pro:update` et distribue maintenant un snapshot mesh partage via `/api/sdr/mesh` pour les autres modules MAMO.</p></div></div>}
 
-          {panel === "architecture" && <div className="grid two">{MAMO_STACK_MODULES.map((module) => <div key={module.title} className="card"><div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}><h3 style={{ margin: 0 }}>{module.title}</h3><span className="tcv-chip tcv-chip-amber">{module.role}</span></div><div className="tcv-list" style={{ marginTop: 12 }}><KV label="Outil suggere" value={module.tool} /><KV label="Role" value={module.detail} /></div></div>)}<div className="card"><h3>Profil radio mesh</h3><div className="tcv-list"><KV label="Centre" value={`${MAMO_MESH_CENTER_MHZ} MHz`} /><KV label="Span" value={`${MAMO_MESH_SPAN_KHZ} kHz`} /><KV label="Bin" value={`${MAMO_MESH_BIN_KHZ} kHz`} /><KV label="Gain" value={`${MAMO_MESH_GAIN_DB} dB`} /><KV label="Integration" value={`${MAMO_MESH_INTEGRATION_SECONDS} s`} /></div></div><div className="card"><h3>Modules operateurs</h3><div className="tcv-list"><KV label="Protocole mesh" value="Reticulum ou Meshtastic" /><KV label="Monitoring" value="Grafana + Loki" /><KV label="Distribution" value="Event mamo-stream-pro:update + export local + /api/sdr/mesh partage" /><KV label="Registre" value={MAMO_MESH_LOG_KEYS.join(", ")} /></div></div><CodeCard title="Probe service JSON" code={MAMO_PROBE_COMMAND} onCopy={copyText} /><CodeCard title="Probe direct hardware" code={MAMO_DIRECT_PROBE_COMMAND} onCopy={copyText} /><CodeCard title="Commandes backend" code={MAMO_BACKEND_COMMANDS} onCopy={copyText} /><CodeCard title="Schema logs mesh" code={MAMO_MESH_LOG_SCHEMA} onCopy={copyText} /></div>}
+          {panel === "architecture" && <div className="grid two">{MAMO_STACK_MODULES.map((module) => <div key={module.title} className="card"><div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}><h3 style={{ margin: 0 }}>{module.title}</h3><span className="tcv-chip tcv-chip-amber">{module.role}</span></div><div className="tcv-list" style={{ marginTop: 12 }}><KV label="Outil suggere" value={module.tool} /><KV label="Role" value={module.detail} /></div></div>)}<div className="card"><h3>Profil radio mesh</h3><div className="tcv-list"><KV label="Centre" value={`${MAMO_MESH_CENTER_MHZ} MHz`} /><KV label="Span" value={`${MAMO_MESH_SPAN_KHZ} kHz`} /><KV label="Bin" value={`${MAMO_MESH_BIN_KHZ} kHz`} /><KV label="Gain" value={`${MAMO_MESH_GAIN_DB} dB`} /><KV label="Integration" value={`${MAMO_MESH_INTEGRATION_SECONDS} s`} /></div></div><div className="card"><h3>Modules operateurs</h3><div className="tcv-list"><KV label="Protocole mesh" value="Reticulum ou Meshtastic" /><KV label="Monitoring" value="Grafana + Loki" /><KV label="Distribution" value="Event mamo-stream-pro:update + export local + /api/sdr/mesh partage" /><KV label="Registre" value={MAMO_MESH_LOG_KEYS.join(", ")} /><KV label="Journal JSONL" value={metrics.sdrLogPath || "backend/data/mamo-mesh-log.jsonl"} /></div></div><CodeCard title="Probe service JSON" code={MAMO_PROBE_COMMAND} onCopy={copyText} /><CodeCard title="Tail journal mesh" code={MAMO_LOG_TAIL_COMMAND} onCopy={copyText} /><CodeCard title="Probe direct hardware" code={MAMO_DIRECT_PROBE_COMMAND} onCopy={copyText} /><CodeCard title="Commandes backend" code={MAMO_BACKEND_COMMANDS} onCopy={copyText} /><CodeCard title="Schema logs mesh" code={MAMO_MESH_LOG_SCHEMA} onCopy={copyText} /></div>}
 
           {panel === "feed" && <div className="grid two" style={{ gridTemplateColumns: "minmax(0,1fr) 320px" }}><div className="card"><h3>Flux live</h3><div ref={feedRef} className="tcv-terminal">{filteredLogs.length ? filteredLogs.map((log) => <EventRow key={log.id} log={log} active={log.id === selectedLogId} onClick={() => setSelectedLogId(log.id)} />) : <div className="muted">Aucun log pour ce filtre.</div>}</div></div><div className="card"><h3>Details</h3>{selectedLog ? <div className="tcv-list"><KV label="Type" value={selectedLog.type} /><KV label="Source" value={selectedLog.source} /><KV label="Payload" value={selectedLog.payload} />{Object.entries(selectedLog.details || {}).map(([key, value]) => <KV key={key} label={key} value={String(value)} />)}</div> : <div className="muted">Aucun evenement selectionne.</div>}</div></div>}
 
           {panel === "scanner" && <div className="grid two"><div className="card"><h3>Scanner SDR</h3>{sdrSnapshot ? <div className="tcv-list"><KV label="Timestamp UTC" value={sdrSnapshot.timestampUtc || "-"} /><KV label="Frequence cible" value={`${sdrSnapshot.targetFrequencyMHz} MHz`} /><KV label="Pic" value={`${Number(sdrSnapshot.peakFrequencyMHz || 0).toFixed(4)} MHz`} /><KV label="Puissance pic" value={`${Number(sdrSnapshot.peakPowerDb || 0).toFixed(2)} dB`} /><KV label="Bruit moyen" value={`${Number(sdrSnapshot.noiseMeanDb || 0).toFixed(2)} dB`} /><KV label="SNR" value={`${Number(sdrSnapshot.snrDb || 0).toFixed(2)} dB`} /><KV label="Offset" value={`${formatSigned(Number(sdrSnapshot.offsetMHz || 0), 4)} MHz`} /><KV label="Lock" value={sdrSnapshot.lockAcquired ? "Oui" : "Non"} /><KV label="Mesh ready" value={sdrSnapshot.meshReady ? "Oui" : "Non"} /><KV label="Qualite" value={sdrSnapshot.quality || "-"} /><KV label="Latence scan" value={`${Number(sdrSnapshot.scanDurationMs || 0).toFixed(2)} ms`} /><KV label="Bins" value={String(sdrSnapshot.binCount || 0)} /></div> : <p className="warn">Le pont SDR ne renvoie pas encore de scan. Si tu es en public, il restera protege; en local il doit repondre via `rtl_power`.</p>}</div><div className="card"><h3>Sources reelles raccordees</h3><div className="tcv-list"><div className="tcv-list-item"><div><strong>Bridge</strong><p>/api/sdr/mesh</p></div><span className={metrics.sdrBridge === "connected" ? "ok" : "warn"}>{metrics.sdrBridge}</span></div><div className="tcv-list-item"><div><strong>Service</strong><p>/api/sdr/mesh/service</p></div><span className={metrics.sdrServiceRunning ? "ok" : "warn"}>{metrics.sdrServiceRunning ? "actif" : "arrete"}</span></div><div className="tcv-list-item"><div><strong>Derniere mise a jour</strong><p>Snapshot partage</p></div><span>{metrics.sdrServiceLastUpdatedUtc || "-"}</span></div><div className="tcv-list-item"><div><strong>Succes service</strong><p>Cycles valides</p></div><span>{metrics.sdrServiceSuccessCount}</span></div><div className="tcv-list-item"><div><strong>Dongle</strong><p>{sdrSnapshot?.device?.vendor || "RTL-SDR"}</p></div><span>{sdrSnapshot?.device?.tuner || "-"}</span></div><div className="tcv-list-item"><div><strong>Wallet</strong><p>window.ethereum</p></div><span>{walletAddress ? "OK" : "OFF"}</span></div><div className="tcv-list-item"><div><strong>Defender</strong><p>/api/defender/ping</p></div><span>{metrics.defenderStatus}</span></div><div className="tcv-list-item"><div><strong>Web3 events</strong><p>/api/web3/events/mining</p></div><span>{metrics.blockEvents}</span></div></div>{metrics.sdrServiceError ? <p className="warn" style={{ marginTop: 12 }}>Erreur service: {metrics.sdrServiceError}</p> : null}{sdrTopBins.length ? <div className="tcv-list" style={{ marginTop: 12 }}>{sdrTopBins.map((bin, index) => <KV key={`${bin.frequencyHz}-${index}`} label={`Peak ${index + 1}`} value={`${Number((bin.frequencyHz || 0) / 1_000_000).toFixed(4)} MHz · ${Number(bin.powerDb || 0).toFixed(2)} dB`} />)}</div> : null}</div></div>}
 
-          {panel === "registry" && <div className="card"><h3>Registre local</h3><div className="table-wrap"><table className="bloomberg"><thead><tr><th>Cle</th><th>Source</th><th>Type</th><th>Horodatage</th><th>Checksum</th></tr></thead><tbody>{registryRows.map((row) => <tr key={row.key}><td>{row.key}</td><td>{row.source}</td><td>{row.type}</td><td>{row.stamp}</td><td>{row.checksum}</td></tr>)}</tbody></table></div></div>}
+          {panel === "registry" && <div className="grid two"><div className="card"><h3>Registre local</h3><div className="table-wrap"><table className="bloomberg"><thead><tr><th>Cle</th><th>Source</th><th>Type</th><th>Horodatage</th><th>Checksum</th></tr></thead><tbody>{registryRows.map((row) => <tr key={row.key}><td>{row.key}</td><td>{row.source}</td><td>{row.type}</td><td>{row.stamp}</td><td>{row.checksum}</td></tr>)}</tbody></table></div></div><div className="card"><h3>Journal mesh JSONL</h3><div className="tcv-list"><KV label="Chemin" value={metrics.sdrLogPath || "-"} /><KV label="Entrees chargees" value={String(metrics.sdrLogEntryCount || 0)} /></div>{meshLogTail.length ? <div className="tcv-list" style={{ marginTop: 12 }}>{meshLogTail.map((entry, index) => <KV key={`${entry.timestampUtc || entry.message || index}-${index}`} label={entry.kind === "error" ? `Erreur ${index + 1}` : `Snapshot ${index + 1}`} value={entry.kind === "error" ? `${entry.timestampUtc || "-"} · ${entry.message || "-"}` : `${entry.timestampUtc || "-"} · SNR ${Number(entry.snrDb || 0).toFixed(2)} dB · lock ${entry.lockAcquired ? "oui" : "non"}`} />)}</div> : <p className="muted" style={{ marginTop: 12 }}>Aucune entree JSONL chargee.</p>}</div></div>}
 
           {panel === "aibridge" && <div className="grid two"><div className="card"><div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}><h3 style={{ margin: 0 }}>AI Bridge</h3><span className="tcv-chip tcv-chip-amber"><Cpu size={14} /> Backend only</span></div><div className="tcv-list" style={{ marginTop: 12 }}><KV label="Mode recommande" value="Responses API" /><KV label="Modele code" value="gpt-5.2" /><KV label="Usage" value="Generation, debug, documentation et outils de code pour MAMO" /><KV label="Securite" value="Ne jamais exposer la cle API dans le frontend" /></div><p className="muted" style={{ marginTop: 12 }}>Le bridge IA doit tourner cote node ou backend, jamais directement dans le navigateur public.</p></div><div className="card"><h3>Note de compatibilite</h3><div className="tcv-list"><KV label="Codex historique" value="Retire" /><KV label="Equivalent actuel" value="Responses API + modeles GPT-5.x" /><KV label="Cible" value="Automatiser les scripts, parseurs et correctifs MAMO" /></div></div><CodeCard title="OpenAI Responses cURL" code={MAMO_OPENAI_RESPONSES_CURL} onCopy={copyText} /><CodeCard title="OpenAI Responses Python" code={MAMO_OPENAI_RESPONSES_PYTHON} onCopy={copyText} /><div className="card"><div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}><h3 style={{ margin: 0 }}>Prompt presets</h3><button onClick={() => copyText("Prompts IA", MAMO_AI_PROMPTS.join("\n"))}>Copier</button></div><div className="tcv-list" style={{ marginTop: 12 }}>{MAMO_AI_PROMPTS.map((prompt) => <KV key={prompt} label="Prompt" value={prompt} />)}</div></div></div>}
 
