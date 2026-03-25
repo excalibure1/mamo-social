@@ -244,6 +244,10 @@ function buildNodeArt(color) {
   )}`;
 }
 
+function resolvePlayableUrl(item) {
+  return item?.url || item?.fallbackUrl || DEFAULT_STREAM_URL;
+}
+
 function PlayerNodeCard({ item }) {
   return (
     <div className="cdn-player-node">
@@ -407,9 +411,15 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     video.playsInline = true;
     video.autoplay = true;
     video.controls = isTouchDevice;
+    video.preload = "metadata";
+    video.crossOrigin = "anonymous";
+    video.disableRemotePlayback = true;
 
     const safePlay = async () => {
       try {
+        if (playerItem.source !== "hls" && video.currentSrc) {
+          video.load();
+        }
         await video.play();
         if (!cancelled) {
           setIsPlaying(true);
@@ -500,7 +510,7 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
         return;
       }
 
-      video.src = playerItem.url || playerItem.fallbackUrl || DEFAULT_STREAM_URL;
+      video.src = resolvePlayableUrl(playerItem);
       await safePlay();
     };
 
@@ -580,6 +590,9 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
       }
       video.pause();
       video.currentTime = 0;
+      video.removeAttribute("src");
+      delete video.dataset.previewSrc;
+      video.load();
       previewPlayPromiseRef.current = null;
     }
     setPreviewItemId((current) => (current === itemId ? null : current));
@@ -591,11 +604,19 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     await stopPreview(previewItemId);
     const video = previewVideoRefs.current.get(item.id);
     if (!video) return;
+    const nextUrl = resolvePlayableUrl(item);
 
     setPreviewItemId(item.id);
     setPreviewRemaining(15);
     video.currentTime = 0;
     video.muted = true;
+    video.preload = "metadata";
+    video.crossOrigin = "anonymous";
+    if (video.dataset.previewSrc !== nextUrl) {
+      video.dataset.previewSrc = nextUrl;
+      video.src = nextUrl;
+      video.load();
+    }
     previewPlayPromiseRef.current = video.play();
     await previewPlayPromiseRef.current.catch(() => {});
 
@@ -989,11 +1010,13 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
                             if (node) previewVideoRefs.current.set(item.id, node);
                             else previewVideoRefs.current.delete(item.id);
                           }}
-                          src={item.url || ""}
                           muted
                           loop
                           playsInline
+                          preload="none"
+                          crossOrigin="anonymous"
                           className="cdn-preview-video"
+                          onError={() => stopPreview(item.id)}
                         />
                         <div className="cdn-preview-countdown">{previewRemaining}s</div>
                         <div className="cdn-preview-label">PREVIEW NODE</div>
@@ -1065,6 +1088,9 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
                     poster={playerItem.poster}
                     muted={playerMuted}
                     playsInline
+                    preload="metadata"
+                    crossOrigin="anonymous"
+                    disableRemotePlayback
                     controls={isTouchDevice}
                   />
                 )}
