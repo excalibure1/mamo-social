@@ -166,6 +166,21 @@ function buildCdnServiceUrl(api, action = "") {
   return action ? api(`/api/platform/cdn/service/${action}`) : api("/api/platform/cdn/service");
 }
 
+function buildSignalHubUrl(api, userAddress = "") {
+  const base = api("/api/platform/signal-hub");
+  const params = new URLSearchParams({ logLimit: "8" });
+  if (userAddress) params.set("walletAddress", userAddress);
+  return `${base}?${params.toString()}`;
+}
+
+function buildMeshServiceUrl(api) {
+  return api("/api/sdr/mesh/service?auto_start=true");
+}
+
+function buildMeshSnapshotUrl(api) {
+  return api("/api/sdr/mesh");
+}
+
 async function fetchWithTimeout(resource, options = {}, timeoutMs = 6000) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -242,6 +257,250 @@ function buildNodeArt(color) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
     `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="100" rx="20" fill="#0f172a"/><circle cx="50" cy="50" r="30" fill="none" stroke="${color}" stroke-width="2" opacity="0.35"/><circle cx="50" cy="50" r="8" fill="${color}"/></svg>`
   )}`;
+}
+
+function toNumber(value, fallback = 0) {
+  const nextValue = Number(value);
+  return Number.isFinite(nextValue) ? nextValue : fallback;
+}
+
+function buildMeshSignalHubFallback(meshSnapshot, meshService) {
+  if (!meshSnapshot) return null;
+  const activePeaks = Array.isArray(meshSnapshot.activePeaks) ? meshSnapshot.activePeaks : [];
+  const contacts = [
+    {
+      id: "mesh-core",
+      name: "MAMO Mesh Core",
+      alias: "@mesh_core",
+      status: meshService?.running ? "online" : "offline",
+      type: "trusted",
+      meta: `${meshSnapshot.targetFrequencyMHz || "-"} MHz | ${meshSnapshot.quality || "watch"}`,
+    },
+    ...activePeaks.slice(0, 4).map((peak, index) => ({
+      id: `mesh-peak-${index + 1}`,
+      name: `Node Peak ${index + 1}`,
+      alias: `@peak_${index + 1}`,
+      status: "online",
+      type: "peer",
+      meta: `${peak.frequencyMHz || "-"} MHz | ${peak.powerDb || "-"} dB`,
+    })),
+  ];
+
+  return {
+    timestampUtc: meshSnapshot.timestampUtc || "",
+    source: "mamo-cdn-live-fallback",
+    mesh: {
+      available: true,
+      snapshot: meshSnapshot,
+      service: meshService || {},
+      logPath: meshService?.logPath || "",
+      logCount: 0,
+      logTail: [],
+    },
+    telecom: {
+      activeNodes: Math.max(toNumber(meshSnapshot.activePeakCount, 0), contacts.length),
+      channel: {
+        label: "MAMO Mesh",
+        frequencyMHz: meshSnapshot.targetFrequencyMHz || null,
+        quality: meshSnapshot.quality || "watch",
+        meshReady: Boolean(meshSnapshot.meshReady),
+        serviceRunning: Boolean(meshService?.running),
+      },
+      contacts,
+      meshFeed: [],
+    },
+    distribution: {
+      health: meshSnapshot.meshReady ? "ready" : meshSnapshot.lockAcquired ? "watch" : "degraded",
+      threatScore: meshSnapshot.meshReady ? 18 : meshSnapshot.lockAcquired ? 34 : 56,
+      lastMeshEventUtc: meshSnapshot.timestampUtc || "",
+    },
+  };
+}
+
+function buildDerivedNodes(signalHub, existingNodes = [], catalog = []) {
+  const nodesById = new Map();
+  existingNodes.forEach((node, index) => {
+    const key = String(node.id || node.alias || node.name || `node-${index}`).toLowerCase();
+    nodesById.set(key, { ...node });
+  });
+
+  const contacts = Array.isArray(signalHub?.telecom?.contacts) ? signalHub.telecom.contacts : [];
+  contacts.forEach((contact, index) => {
+    const key = String(contact.id || contact.alias || contact.name || `contact-${index}`).toLowerCase();
+    const existing = nodesById.get(key) || {};
+    const capacityGb = Math.max(32, toNumber(existing.capacityGb, contact.type === "trusted" ? 128 : 64));
+    const usedGb = Math.min(capacityGb, Math.max(4, toNumber(existing.usedGb, 10 + index * 6)));
+    const storedContentCount = Math.max(1, toNumber(existing.storedContentCount, Math.min(Math.max(catalog.length, 1), 2 + index)));
+    nodesById.set(key, {
+      id: contact.id || existing.id || `mesh-contact-${index + 1}`,
+      name: contact.name || existing.name || `Node MAMO ${index + 1}`,
+      alias: contact.alias || existing.alias || `@mamo_node_${index + 1}`,
+      status: contact.status || existing.status || "online",
+      meta: contact.meta || existing.meta || "Node mesh",
+      type: contact.type || existing.type || "peer",
+      capacityGb,
+      usedGb,
+      replicatedCount: Math.max(toNumber(existing.replicatedCount, 0), Math.min(storedContentCount, Math.max(1, index + 1))),
+      storedContentCount,
+    });
+  });
+
+  const nodes = Array.from(nodesById.values());
+  const targetCount = Math.max(toNumber(signalHub?.telecom?.activeNodes, 0), nodes.length);
+  for (let index = nodes.length; index < targetCount; index += 1) {
+    nodes.push({
+      id: `mesh-live-${index + 1}`,
+      name: `MAMO Live Node ${index + 1}`,
+      alias: `@mesh_live_${index + 1}`,
+      status: "online",
+      meta: signalHub?.telecom?.channel?.frequencyMHz ? `${signalHub.telecom.channel.frequencyMHz} MHz` : "Node mesh",
+      type: "peer",
+      capacityGb: 64,
+      usedGb: Math.min(64, 12 + index * 4),
+      replicatedCount: Math.max(1, Math.min(catalog.length || 1, index + 1)),
+      storedContentCount: Math.max(1, Math.min(catalog.length || 1, index + 2)),
+    });
+  }
+
+  return nodes.sort((left, right) => {
+    const leftOnline = left.status === "online" ? 1 : 0;
+    const rightOnline = right.status === "online" ? 1 : 0;
+    if (leftOnline !== rightOnline) return rightOnline - leftOnline;
+    return String(left.name || "").localeCompare(String(right.name || ""));
+  });
+}
+
+function buildDerivedSyncQueue(catalog = [], nodes = [], existingQueue = [], service = {}) {
+  if (Array.isArray(existingQueue) && existingQueue.length) {
+    return existingQueue;
+  }
+
+  const onlineNodes = nodes.filter((node) => node.status === "online");
+  if (!catalog.length || !onlineNodes.length) return [];
+
+  return catalog
+    .slice(0, Math.min(6, catalog.length))
+    .map((item, index) => {
+      const holders = Array.isArray(item.holders) ? item.holders : [];
+      const currentReplicas = Math.max(toNumber(item.replicaCount, holders.length), holders.length);
+      const desiredReplicas = Math.max(toNumber(item.desiredReplicas, 0), Math.min(3, Math.max(1, onlineNodes.length)));
+      const targetNode = onlineNodes[(index + currentReplicas) % onlineNodes.length];
+      return {
+        id: `live-sync-${item.id}`,
+        title: item.title,
+        reason: item.syncState === "ready" ? "mesh_distribution" : "catalog_sync",
+        currentReplicas,
+        desiredReplicas,
+        targetNodeName: targetNode?.name || "MAMO Mesh Core",
+        priority: item.priority || (index < 2 ? "critical" : "medium"),
+        state: service.running ? "queued" : "pending",
+        progress: service.running ? Math.min(92, Math.round((currentReplicas / desiredReplicas) * 100)) : 0,
+      };
+    })
+    .filter((job) => job.currentReplicas < job.desiredReplicas || job.priority === "critical");
+}
+
+function mergeLiveRegistrySnapshot({
+  registryPayload,
+  signalHubPayload,
+  cdnServicePayload,
+  meshServicePayload,
+  meshPayload,
+}) {
+  const catalog = Array.isArray(registryPayload?.catalog) && registryPayload.catalog.length
+    ? registryPayload.catalog
+    : createFallbackCatalog();
+  const meshSnapshot = signalHubPayload?.mesh?.snapshot || registryPayload?.signalHub?.mesh?.snapshot || meshPayload || null;
+  const fallbackSignalHub = buildMeshSignalHubFallback(meshSnapshot, meshServicePayload);
+  const signalHub = signalHubPayload || registryPayload?.signalHub || fallbackSignalHub;
+  const mergedSignalHub = signalHub
+    ? {
+        ...signalHub,
+        mesh: {
+          ...(signalHub.mesh || {}),
+          available: Boolean(meshSnapshot || signalHub.mesh?.available),
+          snapshot: meshSnapshot || signalHub.mesh?.snapshot || null,
+          service: {
+            ...(signalHub.mesh?.service || {}),
+            ...(meshServicePayload || {}),
+          },
+          logPath: signalHub.mesh?.logPath || meshServicePayload?.logPath || "",
+        },
+      }
+    : null;
+
+  const nodes = buildDerivedNodes(mergedSignalHub, registryPayload?.nodes || [], catalog);
+  const onlineNodes = nodes.filter((node) => node.status === "online").length;
+  const distribution = {
+    ...(registryPayload?.distribution || {}),
+    ...(mergedSignalHub?.distribution || {}),
+  };
+  if (!distribution.health) {
+    distribution.health = meshSnapshot?.meshReady
+      ? "ready"
+      : meshSnapshot?.lockAcquired || meshServicePayload?.running
+        ? "watch"
+        : "degraded";
+  }
+  if (!distribution.lastMeshEventUtc) {
+    distribution.lastMeshEventUtc = mergedSignalHub?.timestampUtc || meshSnapshot?.timestampUtc || "";
+  }
+
+  const serviceBase = registryPayload?.service || {};
+  const service = {
+    ...serviceBase,
+    ...(cdnServicePayload || {}),
+    running: Boolean(serviceBase.running || cdnServicePayload?.running || meshServicePayload?.running || mergedSignalHub?.telecom?.channel?.serviceRunning),
+    intervalSeconds: toNumber(cdnServicePayload?.intervalSeconds, toNumber(serviceBase.intervalSeconds, toNumber(meshServicePayload?.intervalSeconds, 0))),
+    processedJobs: Math.max(
+      toNumber(cdnServicePayload?.processedJobs, 0),
+      toNumber(serviceBase.processedJobs, 0),
+      toNumber(meshServicePayload?.successCount, 0)
+    ),
+    lastUpdatedUtc:
+      cdnServicePayload?.lastUpdatedUtc ||
+      serviceBase.lastUpdatedUtc ||
+      meshServicePayload?.lastUpdatedUtc ||
+      meshSnapshot?.timestampUtc ||
+      mergedSignalHub?.timestampUtc ||
+      "",
+    autostart: Boolean(cdnServicePayload?.autostart ?? serviceBase.autostart ?? meshServicePayload?.autostart ?? false),
+    logPath: cdnServicePayload?.logPath || serviceBase.logPath || meshServicePayload?.logPath || mergedSignalHub?.mesh?.logPath || "",
+  };
+
+  const syncQueue = buildDerivedSyncQueue(catalog, nodes, registryPayload?.syncQueue || [], service);
+  if (!service.latestJob && syncQueue.length) {
+    service.latestJob = {
+      title: syncQueue[0].title,
+      targetNodeName: syncQueue[0].targetNodeName,
+      afterReplicas: syncQueue[0].currentReplicas,
+      desiredReplicas: syncQueue[0].desiredReplicas,
+    };
+  }
+
+  const freshAssets = catalog.filter((item) => ["fresh", "live", "synced", "ready"].includes(String(item.freshness || item.syncState || "").toLowerCase())).length;
+  const criticalAssets = catalog.filter((item) => ["critical", "high"].includes(String(item.priority || "").toLowerCase())).length;
+
+  return {
+    timestampUtc: registryPayload?.timestampUtc || mergedSignalHub?.timestampUtc || meshSnapshot?.timestampUtc || new Date().toISOString(),
+    source: registryPayload?.source || mergedSignalHub?.source || "mamo-cdn-live-fallback",
+    ...(registryPayload || {}),
+    catalog,
+    nodes,
+    syncQueue,
+    service,
+    signalHub: mergedSignalHub,
+    distribution,
+    summary: {
+      ...(registryPayload?.summary || {}),
+      contentCount: catalog.length,
+      nodeCount: nodes.length,
+      onlineNodes,
+      queuedSyncJobs: syncQueue.length,
+      freshAssets,
+      criticalAssets,
+    },
+  };
 }
 
 function resolvePlayableUrl(item) {
@@ -415,14 +674,53 @@ export default function MamoCdn({ api = (path) => path, authToken = "", userAddr
     try {
       const headers = {};
       if (authToken) headers.Authorization = `Bearer ${authToken}`;
-      const response = await fetchWithTimeout(buildCdnRegistryUrl(api, userAddress), { headers });
-      if (!response.ok) {
-        throw new Error(`cdn_registry_${response.status}`);
+      const [registryResult, hubResult, cdnServiceResult, meshServiceResult, meshResult] = await Promise.allSettled([
+        fetchWithTimeout(buildCdnRegistryUrl(api, userAddress), { headers }),
+        fetchWithTimeout(buildSignalHubUrl(api, userAddress), { headers }),
+        fetchWithTimeout(buildCdnServiceUrl(api), { headers }),
+        fetchWithTimeout(buildMeshServiceUrl(api), { headers }),
+        fetchWithTimeout(buildMeshSnapshotUrl(api), { headers }),
+      ]);
+
+      let registryPayload = null;
+      let hubPayload = null;
+      let cdnServicePayload = null;
+      let meshServicePayload = null;
+      let meshPayload = null;
+
+      if (registryResult.status === "fulfilled" && registryResult.value.ok) {
+        registryPayload = await registryResult.value.json();
       }
-      const payload = await response.json();
+      if (hubResult.status === "fulfilled" && hubResult.value.ok) {
+        hubPayload = await hubResult.value.json();
+      }
+      if (cdnServiceResult.status === "fulfilled" && cdnServiceResult.value.ok) {
+        cdnServicePayload = await cdnServiceResult.value.json();
+      }
+      if (meshServiceResult.status === "fulfilled" && meshServiceResult.value.ok) {
+        meshServicePayload = await meshServiceResult.value.json();
+      }
+      if (meshResult.status === "fulfilled" && meshResult.value.ok) {
+        meshPayload = await meshResult.value.json();
+      }
+
+      const payload = mergeLiveRegistrySnapshot({
+        registryPayload,
+        signalHubPayload: hubPayload,
+        cdnServicePayload,
+        meshServicePayload,
+        meshPayload,
+      });
+
+      if (!payload?.catalog?.length && !payload?.nodes?.length && !payload?.signalHub) {
+        const registryStatus = registryResult.status === "fulfilled" ? registryResult.value.status : "unreachable";
+        throw new Error(`cdn_registry_${registryStatus}`);
+      }
+
       if (mountedRef.current) {
         setRegistrySnapshot(payload);
-        setRegistryError("");
+        const liveAvailable = Boolean(hubPayload || meshPayload || meshServicePayload || cdnServicePayload);
+        setRegistryError(registryPayload || liveAvailable ? "" : "cdn_registry_unavailable");
       }
       return payload;
     } catch (error) {
